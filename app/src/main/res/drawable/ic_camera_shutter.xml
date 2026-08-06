@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Camera shutter / aperture icon.
-  A simple circle with an inner ring and a small centre dot -- universally
+  A simple circle with an inner ring and a small centre dot, universally
   recognised as a camera shutter symbol without depending on any third-party
   icon library.
 -->

@@ -339,7 +339,7 @@ public class MainActivity extends AppCompatActivity {
             Snackbar.make(
                     findViewById(android.R.id.content),
                     nowEnabled
-                            ? "Camera shutter enabled -- works inside camera apps only"
+                            ? "Camera shutter enabled - works inside camera apps only"
                             : "Camera shutter disabled",
                     Snackbar.LENGTH_SHORT).show();
         });
@@ -354,7 +354,7 @@ public class MainActivity extends AppCompatActivity {
             Snackbar.make(
                     findViewById(android.R.id.content),
                     nowEnabled
-                            ? "Camera shutter enabled -- works inside camera apps only"
+                            ? "Camera shutter enabled - works inside camera apps only"
                             : "Camera shutter disabled",
                     Snackbar.LENGTH_SHORT).show();
         });

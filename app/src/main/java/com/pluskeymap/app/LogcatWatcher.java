@@ -307,20 +307,16 @@ public class LogcatWatcher implements Runnable {
             }
         }
 
-        // Pattern 4: "callPackageName=com.oplus.camera" — AIUnit-PluginUnit (OxygenOS 15)
-        // Seen in logs: AIUnit-PluginUnit: callPackageName=com.oplus.camera
+        // Pattern 4: "callPackageName=com.oplus.camera)" — AIUnit-PluginUnit (OxygenOS 15)
+        // NOTE: the log line appends a closing ")" after the package name, so we must
+        // use a strict allowlist of valid package name chars (alphanumeric, dot, underscore)
+        // rather than a denylist of separators — otherwise the ")" is included.
         int callPkgIdx = line.indexOf("callPackageName=");
         if (callPkgIdx >= 0) {
             String rest = line.substring(callPkgIdx + "callPackageName=".length());
-            int end = rest.length();
-            for (int i = 0; i < rest.length(); i++) {
-                char c = rest.charAt(i);
-                if (c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '}') {
-                    end = i;
-                    break;
-                }
-            }
-            String pkg = rest.substring(0, end).trim();
+            int end = 0;
+            while (end < rest.length() && isPackageNameChar(rest.charAt(end))) end++;
+            String pkg = rest.substring(0, end);
             if (isValidPackageName(pkg)) {
                 updateForegroundPackage(pkg, "callPackageName=");
                 return;
@@ -348,6 +344,17 @@ public class LogcatWatcher implements Runnable {
     private boolean isValidPackageName(String s) {
         return s != null && !s.isEmpty() && s.contains(".") && !s.contains(" ")
                 && !s.contains("/") && s.length() < 128;
+    }
+
+    /**
+     * Returns true if the character is valid inside an Android package name.
+     * Package names are dot-separated identifiers: [a-zA-Z0-9_] segments joined by '.'.
+     * Used to strip trailing punctuation (e.g. the ')' OxygenOS appends after
+     * callPackageName=com.oplus.camera) in AIUnit-PluginUnit log lines).
+     */
+    private boolean isPackageNameChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '_' || c == '.';
     }
 
     private void updateForegroundPackage(String pkg, String source) {

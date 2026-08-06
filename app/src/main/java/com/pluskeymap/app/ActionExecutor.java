@@ -15,7 +15,6 @@ import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
-import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -528,58 +527,41 @@ public class ActionExecutor {
     }
 
     /**
-     * Injects a key DOWN + UP pair via InputManager reflection.
+     * Dispatches KEYCODE_CAMERA (or any media key) to the foreground app.
      *
-     * InputManager.injectInputEvent() is a hidden API that requires INJECT_EVENTS
-     * permission or SYSTEM_ALERT_WINDOW on OxygenOS. We already hold
-     * SYSTEM_ALERT_WINDOW (granted via ADB during setup), so this works without
-     * root. The inject mode INJECT_INPUT_EVENT_MODE_ASYNC (0) is used to avoid
-     * blocking the calling thread.
+     * Strategy: AudioManager.dispatchMediaKeyEvent() is the correct public API
+     * for dispatching hardware-button-equivalent key events from a background
+     * service. This is exactly the path the Android framework itself uses when
+     * a physical camera button or headset button is pressed — no special
+     * permissions are required beyond what the app already holds.
      *
-     * InputManager.getInstance() was removed from the public API surface in
-     * SDK 35. We obtain the instance via Context.getSystemService(INPUT_SERVICE)
-     * instead, which is stable across all supported API levels.
+     * InputManager.injectInputEvent() was the previous approach but is blocked
+     * on OxygenOS 15 with an InvocationTargetException (SecurityException at
+     * runtime) because INJECT_EVENTS is a signature-level permission that
+     * SYSTEM_ALERT_WINDOW does NOT substitute for. dispatchMediaKeyEvent has
+     * no such restriction and is the documented, stable replacement.
+     *
+     * KEYCODE_CAMERA is classified as a media key by AudioManager and is
+     * routed to the MediaSession of the foreground app, which is how the
+     * OxygenOS camera app expects to receive shutter button events.
      */
     private void injectKey(int keyCode) {
+        AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) {
+            Log.w(TAG, "injectKey: AudioManager unavailable");
+            return;
+        }
         try {
             long downTime = SystemClock.uptimeMillis();
-
-            KeyEvent down = new KeyEvent(
-                    downTime, downTime,
-                    KeyEvent.ACTION_DOWN, keyCode, 0,
-                    0, -1, 0,
-                    KeyEvent.FLAG_FROM_SYSTEM,
-                    InputDevice.SOURCE_KEYBOARD);
-
-            KeyEvent up = new KeyEvent(
-                    downTime, SystemClock.uptimeMillis(),
-                    KeyEvent.ACTION_UP, keyCode, 0,
-                    0, -1, 0,
-                    KeyEvent.FLAG_FROM_SYSTEM,
-                    InputDevice.SOURCE_KEYBOARD);
-
-            // Context.INPUT_SERVICE ("input") is the stable way to get InputManager
-            // on SDK 35+. InputManager.getInstance() was a hidden static accessor
-            // that the compiler no longer resolves against the public API stubs.
-            Object inputManager = context.getSystemService(Context.INPUT_SERVICE);
-            if (inputManager == null) {
-                Log.w(TAG, "injectKey: INPUT_SERVICE unavailable");
-                return;
-            }
-
-            java.lang.reflect.Method inject = inputManager.getClass()
-                    .getMethod("injectInputEvent",
-                            android.view.InputEvent.class, int.class);
-            inject.setAccessible(true);
-
-            // INJECT_INPUT_EVENT_MODE_ASYNC = 0, fire-and-forget, non-blocking
-            inject.invoke(inputManager, down, 0);
-            inject.invoke(inputManager, up,   0);
-
-            Log.d(TAG, "injectKey: KEYCODE=" + keyCode + " injected successfully");
+            am.dispatchMediaKeyEvent(new KeyEvent(downTime, downTime,
+                    KeyEvent.ACTION_DOWN, keyCode, 0));
+            am.dispatchMediaKeyEvent(new KeyEvent(downTime, SystemClock.uptimeMillis(),
+                    KeyEvent.ACTION_UP, keyCode, 0));
+            Log.d(TAG, "injectKey: KEYCODE=" + keyCode + " dispatched via AudioManager");
         } catch (Exception e) {
-            Log.w(TAG, "injectKey: injection failed (" + e.getClass().getSimpleName()
-                    + "): " + e.getMessage());
+            Log.w(TAG, "injectKey: dispatch failed (" + e.getClass().getSimpleName()
+                    + "): " + e.getMessage()
+                    + (e.getCause() != null ? " cause=" + e.getCause().getMessage() : ""));
         }
     }
 

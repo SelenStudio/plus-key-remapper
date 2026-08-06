@@ -569,14 +569,6 @@
                         android:layout_marginTop="10dp"
                         android:visibility="gone">
 
-                        <ImageView
-                            android:layout_width="16dp"
-                            android:layout_height="16dp"
-                            android:layout_marginEnd="8dp"
-                            android:src="@drawable/ic_status_warning"
-                            android:tint="?attr/colorError"
-                            android:contentDescription="Warning" />
-
                         <TextView
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"

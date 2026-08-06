@@ -192,6 +192,11 @@ public class MainActivity extends AppCompatActivity {
         applySkippedState(oemLogcatDenied);
         applySingleOnlyMode();
         refreshServiceStatus(false);
+        // Re-evaluate the shutter card state in case the user just granted/revoked
+        // accessibility access from the system settings screen.
+        if (switchCameraShutter != null) {
+            refreshShutterCardState(switchCameraShutter.isChecked());
+        }
         IntentFilter filter = new IntentFilter(DetectorService.ACTION_KEY_DETECTED);
         filter.addAction(DetectorService.ACTION_LOGCAT_FAILED);
         filter.addAction(DetectorService.ACTION_LOGCAT_OEM_DENIED);
@@ -312,95 +317,109 @@ public class MainActivity extends AppCompatActivity {
 
     // ── Camera shutter card ──────────────────────────────────────────────────
 
+    private View rowA11yWarning;
+
     /**
      * Initialises the camera shutter toggle card.
      *
-     * The card stores its enabled state in pkm_settings under the key
-     * KEY_CAMERA_SHUTTER_ENABLED. When toggled on, single-tap presses are
-     * intercepted by ActionExecutor.executeForSingleTap() and redirected to
-     * a node-based accessibility click on the shutter button whenever a camera
-     * app is in the foreground.
+     * Visual states:
+     *   • Toggle OFF → normal card, no warning row.
+     *   • Toggle ON + a11y granted → normal card, no warning row.
+     *   • Toggle ON + a11y NOT granted → card background tinted red,
+     *       warning row visible; tapping the card body opens Accessibility Settings.
      *
-     * Enabling the feature while the accessibility service is not active shows
-     * a mandatory dialog directing the user to Settings → Accessibility. The
-     * feature is saved as enabled so it activates automatically once the service
-     * is turned on — no need to toggle again after granting access.
+     * The preference is saved immediately on toggle — no dialog. When the card
+     * is in the warning state, tapping anywhere on it opens Accessibility Settings
+     * rather than re-toggling. The switch still works normally for on/off.
      */
     private void bindCameraShutterCard() {
+        rowA11yWarning = findViewById(R.id.rowA11yWarning);
+
         SharedPreferences settings = getSharedPreferences(
                 SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE);
         boolean enabled = settings.getBoolean(
                 ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, false);
         switchCameraShutter.setChecked(enabled);
+        refreshShutterCardState(enabled);
 
-        // Tapping anywhere on the card toggles the switch
+        // Card body tap: if warning state → open a11y settings; otherwise toggle.
         cardCameraShutter.setOnClickListener(v -> {
-            boolean nowEnabled = !switchCameraShutter.isChecked();
-            handleCameraShutterToggle(nowEnabled);
+            if (switchCameraShutter.isChecked() && !isAccessibilityServiceEnabled()) {
+                openAccessibilitySettings();
+            } else {
+                boolean nowEnabled = !switchCameraShutter.isChecked();
+                applyShutterToggle(nowEnabled);
+            }
         });
 
-        // Let the switch itself toggle without double-firing via the card click
-        switchCameraShutter.setOnClickListener(v -> {
-            boolean nowEnabled = switchCameraShutter.isChecked();
-            handleCameraShutterToggle(nowEnabled);
-        });
+        // Switch tap: always toggles; card visual updates accordingly.
+        switchCameraShutter.setOnClickListener(v ->
+                applyShutterToggle(switchCameraShutter.isChecked()));
     }
 
-    /**
-     * Applies a camera shutter toggle change.
-     *
-     * If the user is enabling the feature and the accessibility service is not
-     * currently connected, show a dialog explaining why it is required and offer
-     * a direct link to Settings → Accessibility. The preference is still saved
-     * as enabled so it works immediately once the user grants access — they
-     * will not need to come back and toggle again.
-     *
-     * If the user is disabling the feature, apply it silently.
-     */
-    private void handleCameraShutterToggle(boolean nowEnabled) {
+    /** Saves the shutter preference and refreshes the card visual state. */
+    private void applyShutterToggle(boolean nowEnabled) {
         switchCameraShutter.setChecked(nowEnabled);
         getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
                 .edit()
                 .putBoolean(ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, nowEnabled)
                 .apply();
-
-        if (nowEnabled && !isAccessibilityServiceEnabled()) {
-            // Show a blocking dialog — without the a11y service the feature does nothing.
-            new MaterialAlertDialogBuilder(this)
-                    .setTitle("Accessibility Access Required")
-                    .setMessage(
-                            "The camera shutter feature works by clicking the shutter button "
-                            + "in the camera app using Android's Accessibility service.\n\n"
-                            + "Please enable \"Plus Key Remapper\" in:\n"
-                            + "Settings → Accessibility → Installed apps\n\n"
-                            + "The feature is already saved as ON — it will activate "
-                            + "automatically once you grant access.")
-                    .setPositiveButton("Open Accessibility Settings", (d, w) -> {
-                        Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(intent);
-                    })
-                    .setNegativeButton("Later", null)
-                    .setCancelable(true)
-                    .show();
-            return;
-        }
-
-        Snackbar.make(
-                findViewById(android.R.id.content),
-                nowEnabled
-                        ? "Camera shutter enabled — works inside camera apps only"
-                        : "Camera shutter disabled",
-                Snackbar.LENGTH_SHORT).show();
+        refreshShutterCardState(nowEnabled);
     }
 
     /**
-     * Returns true if PlusKeyService (the AccessibilityService) is currently
-     * enabled in system accessibility settings.
+     * Updates the camera shutter card's visual state:
+     *   - Toggle ON + a11y missing → red-tinted card + warning row visible.
+     *   - Any other state → normal surface card + warning row gone.
      *
-     * Uses Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES to check whether the
-     * service component is listed — this reflects the Settings toggle state
-     * regardless of whether onServiceConnected has fired yet.
+     * Called on toggle change and on every onResume so the card reflects the
+     * current a11y state without the user needing to leave and return.
+     */
+    private void refreshShutterCardState(boolean shutterEnabled) {
+        boolean needsA11y = shutterEnabled && !isAccessibilityServiceEnabled();
+
+        if (needsA11y) {
+            // Red-tinted background using Material3 errorContainer colour.
+            int errorContainer = com.google.android.material.color.MaterialColors.getColor(
+                    cardCameraShutter,
+                    com.google.android.material.R.attr.colorErrorContainer,
+                    getColor(android.R.color.holo_red_dark));
+            int errorStroke = com.google.android.material.color.MaterialColors.getColor(
+                    cardCameraShutter,
+                    com.google.android.material.R.attr.colorError,
+                    getColor(android.R.color.holo_red_dark));
+            cardCameraShutter.setCardBackgroundColor(errorContainer);
+            cardCameraShutter.setStrokeColor(errorStroke);
+            cardCameraShutter.setStrokeWidth(
+                    (int) (getResources().getDisplayMetrics().density * 1.5f));
+            rowA11yWarning.setVisibility(View.VISIBLE);
+        } else {
+            // Restore normal surface appearance.
+            int surface = com.google.android.material.color.MaterialColors.getColor(
+                    cardCameraShutter,
+                    com.google.android.material.R.attr.colorSurface,
+                    getColor(android.R.color.white));
+            int outline = com.google.android.material.color.MaterialColors.getColor(
+                    cardCameraShutter,
+                    com.google.android.material.R.attr.colorOutlineVariant,
+                    getColor(android.R.color.darker_gray));
+            cardCameraShutter.setCardBackgroundColor(surface);
+            cardCameraShutter.setStrokeColor(outline);
+            cardCameraShutter.setStrokeWidth(
+                    (int) (getResources().getDisplayMetrics().density * 1f));
+            rowA11yWarning.setVisibility(View.GONE);
+        }
+    }
+
+    /** Opens the system Accessibility Settings screen. */
+    private void openAccessibilitySettings() {
+        startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
+    /**
+     * Returns true if PlusKeyService is currently listed in
+     * Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES.
      */
     private boolean isAccessibilityServiceEnabled() {
         String expected = getPackageName() + "/" + PlusKeyService.class.getName();
@@ -409,7 +428,6 @@ public class MainActivity extends AppCompatActivity {
                     getContentResolver(),
                     Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
             if (enabled == null) return false;
-            // The setting is a colon-separated list of component names.
             for (String component : enabled.split(":")) {
                 if (component.trim().equalsIgnoreCase(expected)) return true;
             }

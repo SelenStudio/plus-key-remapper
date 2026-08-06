@@ -76,81 +76,60 @@ public class PlusKeyService extends AccessibilityService {
      * @return true if both down and up events were accepted by the dispatcher.
      */
     public boolean injectVolumeDown() {
-        // Strategy A: InputManager.getInstance().injectInputEvent() via reflection.
-        // Called from the a11y process — the elevated rights are on the process,
-        // not on the method, so the same reflection call that throws SecurityException
-        // from DetectorService succeeds here.
+        // InputManager.getInstance() is a hidden API unavailable at compile time.
+        // The correct public path is getSystemService(INPUT_SERVICE), which returns
+        // the same InputManager binder. Called from the a11y process the reflection
+        // call succeeds — the elevated injection rights are on the process, not the
+        // method, so SecurityException only fires from non-a11y processes.
         try {
-            android.hardware.input.InputManager im =
-                    android.hardware.input.InputManager.getInstance();
+            Object im = getSystemService(INPUT_SERVICE);
+            if (im == null) {
+                Log.w(TAG, "injectVolumeDown: InputManager service null");
+                return false;
+            }
 
-            java.lang.reflect.Method inject = android.hardware.input.InputManager.class
-                    .getMethod("injectInputEvent",
+            // Walk the class hierarchy — the method is on InputManager itself,
+            // but getSystemService returns the concrete implementation class.
+            java.lang.reflect.Method inject = null;
+            Class<?> cls = im.getClass();
+            while (cls != null && inject == null) {
+                try {
+                    inject = cls.getDeclaredMethod("injectInputEvent",
                             android.view.InputEvent.class, int.class);
+                } catch (NoSuchMethodException ignored) {
+                    cls = cls.getSuperclass();
+                }
+            }
+            if (inject == null) {
+                Log.w(TAG, "injectVolumeDown: injectInputEvent not found in InputManager hierarchy");
+                return false;
+            }
             inject.setAccessible(true);
 
             long t = SystemClock.uptimeMillis();
-            KeyEvent down = new KeyEvent(
-                    t, t,
+            KeyEvent down = new KeyEvent(t, t,
                     KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0,
                     KeyEvent.KEYCODE_UNKNOWN, 0,
-                    KeyEvent.FLAG_FROM_SYSTEM,
-                    InputDevice.SOURCE_KEYBOARD);
-            KeyEvent up = new KeyEvent(
-                    t, SystemClock.uptimeMillis(),
+                    KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
+            KeyEvent up = new KeyEvent(t, SystemClock.uptimeMillis(),
                     KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0,
                     KeyEvent.KEYCODE_UNKNOWN, 0,
-                    KeyEvent.FLAG_FROM_SYSTEM,
-                    InputDevice.SOURCE_KEYBOARD);
+                    KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
 
             // INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT = 2
             boolean downOk = (Boolean) inject.invoke(im, down, 2);
             boolean upOk   = (Boolean) inject.invoke(im, up,   2);
-            Log.d(TAG, "injectVolumeDown [A-InputManager]: down=" + downOk + " up=" + upOk);
-            if (downOk || upOk) return downOk && upOk;
-            // Both false means the camera window didn't consume it — fall through to B.
+            Log.d(TAG, "injectVolumeDown: down=" + downOk + " up=" + upOk);
+            return downOk && upOk;
+
         } catch (Exception e) {
             Throwable cause = (e instanceof java.lang.reflect.InvocationTargetException)
                     ? e.getCause() : e;
-            Log.w(TAG, "injectVolumeDown [A-InputManager]: failed ("
+            Log.w(TAG, "injectVolumeDown: failed ("
                     + (cause != null ? cause.getClass().getSimpleName()
                                     : e.getClass().getSimpleName())
                     + "): " + (cause != null ? cause.getMessage() : e.getMessage()));
+            return false;
         }
-
-        // Strategy B: Context.INPUT_SERVICE → InputManager binder → injectInputEvent.
-        // Some OEM builds expose the service under a different instance than
-        // InputManager.getInstance(). Worth trying as a zero-cost fallback.
-        try {
-            Object im = getSystemService(INPUT_SERVICE);
-            if (im != null) {
-                java.lang.reflect.Method inject = im.getClass()
-                        .getMethod("injectInputEvent",
-                                android.view.InputEvent.class, int.class);
-                inject.setAccessible(true);
-                long t = SystemClock.uptimeMillis();
-                KeyEvent down = new KeyEvent(t, t,
-                        KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0,
-                        KeyEvent.KEYCODE_UNKNOWN, 0,
-                        KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
-                KeyEvent up = new KeyEvent(t, SystemClock.uptimeMillis(),
-                        KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0,
-                        KeyEvent.KEYCODE_UNKNOWN, 0,
-                        KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
-                boolean downOk = (Boolean) inject.invoke(im, down, 2);
-                boolean upOk   = (Boolean) inject.invoke(im, up,   2);
-                Log.d(TAG, "injectVolumeDown [B-ContextService]: down=" + downOk + " up=" + upOk);
-                return downOk && upOk;
-            }
-        } catch (Exception e) {
-            Throwable cause = (e instanceof java.lang.reflect.InvocationTargetException)
-                    ? e.getCause() : e;
-            Log.w(TAG, "injectVolumeDown [B-ContextService]: failed ("
-                    + (cause != null ? cause.getClass().getSimpleName()
-                                    : e.getClass().getSimpleName())
-                    + "): " + (cause != null ? cause.getMessage() : e.getMessage()));
-        }
-
-        return false;
     }
 }

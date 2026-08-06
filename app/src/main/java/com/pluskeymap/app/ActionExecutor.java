@@ -375,6 +375,39 @@ public class ActionExecutor {
     }
 
     /**
+     * Maximum age of a logcat foreground-package reading that we still treat as
+     * authoritative for a NEGATIVE (non-camera) result.
+     *
+     * When T1 returns a non-camera package that was seen within this window we
+     * trust it immediately and skip T2/T3.  This prevents T2-UsageStats from
+     * re-instating "com.oplus.camera" after the user has already left the camera
+     * — the usage-stats query returns the camera as "most recently used" for many
+     * seconds after it was backgrounded, which is exactly what caused the ~30 s
+     * shutter-override hang reported in the field.
+     *
+     * The window is intentionally short (4 s) so that if the foreground watcher
+     * somehow missed the very first logcat line (service cold-start race), we
+     * still fall through to T2 rather than giving a spurious false-negative.
+     */
+    private static final long T1_AUTHORITATIVE_NON_CAMERA_AGE_MS = 4_000;
+
+    /**
+     * Maximum delta between "camera app last used" and now that we still count
+     * as "camera is in the foreground" when evaluating UsageStats (T2).
+     *
+     * UsageStats.getLastTimeUsed() is updated when an app is brought to the
+     * foreground, not when it's backgrounded.  So the camera's lastTimeUsed
+     * remains pinned to the instant the user opened it — even 30 s after they
+     * closed it — making it the "most recently used" app until something else
+     * overtakes it.  We gate on a small window here to prevent that stale value
+     * from triggering a shutter action long after the camera was dismissed.
+     *
+     * 3 s covers the realistic "opened camera, pressed button immediately" case
+     * while cutting off the long stale tail.
+     */
+    private static final long T2_CAMERA_FRESHNESS_MS = 3_000;
+
+    /**
      * Returns true when a camera app is the current foreground process.
      *
      * Three-tier detection strategy (Android 10+ getRunningAppProcesses only
@@ -386,11 +419,19 @@ public class ActionExecutor {
      *     launch. LogcatWatcher parses those and stores the last foreground
      *     package as a volatile static field. No extra permission needed.
      *
+     *     A fresh non-camera result from T1 is treated as AUTHORITATIVE — we
+     *     return false immediately without consulting T2/T3.  This prevents
+     *     UsageStats from re-instating a recently-backgrounded camera app as
+     *     the apparent foreground process (the root cause of the ~30 s delay
+     *     before the normal single-tap action resumed after leaving camera).
+     *
      *   Tier 2 - UsageStatsManager.queryUsageStats():
-     *     Queries a 10-second window and picks the most-recently-used app.
-     *     Requires PACKAGE_USAGE_STATS. On OxygenOS this is granted alongside
-     *     READ_LOGS in the same ADB session (both are "development" permissions).
-     *     Falls through to Tier 3 if the permission is not held.
+     *     Only reached when T1 has no data (service cold-start) or T1's data
+     *     is too old to be authoritative.  Queries a 60-second window and picks
+     *     the most-recently-used app, but gates on a freshness threshold so a
+     *     camera app backgrounded more than T2_CAMERA_FRESHNESS_MS ago does
+     *     NOT count as "in foreground".
+     *     Requires PACKAGE_USAGE_STATS (granted via ADB during setup).
      *
      *   Tier 3 - ActivityManager.getRunningAppProcesses() (legacy fallback):
      *     Only returns our own process on Android 10+, but kept as a last
@@ -404,14 +445,32 @@ public class ActionExecutor {
 
         // --- Tier 1: LogcatWatcher foreground package tracking ---
         String logcatPkg = LogcatWatcher.getForegroundPackage();
-        Log.d(TAG, "isCameraAppInForeground [T1-logcat]: lastForegroundPkg=" + logcatPkg);
+        long   logcatAge = LogcatWatcher.getForegroundPackageAgeMs();
+        Log.d(TAG, "isCameraAppInForeground [T1-logcat]: lastForegroundPkg=" + logcatPkg
+                + " ageMs=" + (logcatAge == Long.MAX_VALUE ? "never" : logcatAge));
         if (logcatPkg != null) {
-            boolean match = isCameraPackage(logcatPkg);
-            Log.d(TAG, "isCameraAppInForeground [T1-logcat]: isCameraPackage=" + match
+            boolean isCamera = isCameraPackage(logcatPkg);
+            Log.d(TAG, "isCameraAppInForeground [T1-logcat]: isCameraPackage=" + isCamera
                     + " pkg=" + logcatPkg);
-            if (match) return true;
-            // Non-camera package seen via logcat - still fall through to T2/T3
-            // because the logcat line may be slightly stale (last app BEFORE camera).
+            if (isCamera) {
+                // Camera confirmed via logcat — shutter override active.
+                return true;
+            }
+            // T1 says the foreground app is NOT a camera.
+            // If this reading is recent enough, trust it and skip T2/T3.
+            // This is the critical guard against the "stale camera in UsageStats"
+            // false-positive: even though the camera was the last app used, logcat
+            // has since told us another app took focus, so we must not fire the shutter.
+            if (logcatAge <= T1_AUTHORITATIVE_NON_CAMERA_AGE_MS) {
+                Log.d(TAG, "isCameraAppInForeground [T1-logcat]: non-camera pkg is fresh ("
+                        + logcatAge + " ms) -> returning false (skip T2/T3)");
+                return false;
+            }
+            // T1 data is stale (> T1_AUTHORITATIVE_NON_CAMERA_AGE_MS) — fall through
+            // to T2 so we don't miss the camera if the service just started and T1
+            // hasn't caught up yet.
+            Log.d(TAG, "isCameraAppInForeground [T1-logcat]: non-camera pkg is stale ("
+                    + logcatAge + " ms) -> falling through to T2");
         } else {
             Log.d(TAG, "isCameraAppInForeground [T1-logcat]: no foreground pkg seen yet"
                     + " (no ActivityManager lines captured - camera opened before service started?)");
@@ -455,12 +514,27 @@ public class ActionExecutor {
                         }
                         if (t > topTime) { topTime = t; topPkg = e.getKey(); }
                     }
+                    long topDelta = now - topTime;
                     Log.d(TAG, "isCameraAppInForeground [T2-usage]: topPkg=" + topPkg
-                            + " delta=" + (now - topTime) + "ms");
+                            + " delta=" + topDelta + "ms");
                     if (topPkg != null) {
-                        boolean match = isCameraPackage(topPkg);
-                        Log.d(TAG, "isCameraAppInForeground [T2-usage]: isCameraPackage=" + match);
-                        if (match) return true;
+                        boolean isCamera = isCameraPackage(topPkg);
+                        Log.d(TAG, "isCameraAppInForeground [T2-usage]: isCameraPackage=" + isCamera);
+                        // Guard: UsageStats.lastTimeUsed is set when the app was *opened*, not
+                        // when it was closed.  If the camera was the most-recently-used app but
+                        // it was opened more than T2_CAMERA_FRESHNESS_MS ago, it has almost
+                        // certainly been backgrounded since — don't count it as foreground.
+                        if (isCamera) {
+                            if (topDelta <= T2_CAMERA_FRESHNESS_MS) {
+                                Log.d(TAG, "isCameraAppInForeground [T2-usage]: camera fresh ("
+                                        + topDelta + " ms <= " + T2_CAMERA_FRESHNESS_MS + " ms) -> true");
+                                return true;
+                            } else {
+                                Log.d(TAG, "isCameraAppInForeground [T2-usage]: camera stale ("
+                                        + topDelta + " ms > " + T2_CAMERA_FRESHNESS_MS
+                                        + " ms) -> not counting as foreground");
+                            }
+                        }
                     }
                 } else {
                     Log.w(TAG, "isCameraAppInForeground [T2-usage]: both queries empty."

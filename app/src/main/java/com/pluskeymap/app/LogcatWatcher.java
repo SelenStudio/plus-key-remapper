@@ -43,9 +43,25 @@ public class LogcatWatcher implements Runnable {
      */
     private static volatile String sForegroundPackage = null;
 
+    /**
+     * Wall-clock timestamp (System.currentTimeMillis()) of the last
+     * sForegroundPackage update. Used by ActionExecutor to decide whether
+     * the cached foreground package is fresh enough to be authoritative.
+     */
+    private static volatile long sForegroundPackageTimestamp = 0;
+
     /** Returns the last known foreground package, or null if not yet seen. */
     public static String getForegroundPackage() {
         return sForegroundPackage;
+    }
+
+    /**
+     * Returns how many milliseconds have passed since the foreground package
+     * was last updated, or Long.MAX_VALUE if it has never been set.
+     */
+    public static long getForegroundPackageAgeMs() {
+        long ts = sForegroundPackageTimestamp;
+        return ts == 0 ? Long.MAX_VALUE : System.currentTimeMillis() - ts;
     }
 
     private static final String[] TAG_PATTERNS = {
@@ -358,21 +374,25 @@ public class LogcatWatcher implements Runnable {
     }
 
     /**
-     * Packages that appear in logcat constantly due to background services,
-     * notifications, or overlay activity — NOT because they are in the foreground.
-     * These are blocked from overwriting a real foreground package.
+     * Packages whose logcat noise we must ignore entirely — they appear in
+     * log lines constantly from background services, not because the user
+     * brought them to the foreground.
      *
-     * com.pluskeymap.app    — our own app: appears in pkg= lines whenever we
-     *                         dispatch a key, immediately after the camera shutter.
-     * com.paget96.batteryguru — battery overlay that emits pkg= lines every ~5s
-     *                         from its notification/tile update service.
-     * com.android.systemui  — status bar / notification shade updates constantly.
+     * com.pluskeymap.app    — our own process: emits pkg= lines on every key
+     *                         dispatch, immediately after a camera shutter fire.
+     * com.paget96.batteryguru — battery overlay: floods pkg= every ~5 s from
+     *                         its notification/tile update service.
+     *
+     * NOTE: com.android.systemui is intentionally NOT in this set.
+     * When the user swipes down the notification shade while the camera is open,
+     * systemui becomes the top window.  We must let that signal clear the stale
+     * "com.oplus.camera" foreground state so the next key press returns to
+     * the normal single-tap action instead of firing the shutter into thin air.
      */
     private static final java.util.Set<String> BACKGROUND_NOISE_PACKAGES =
             new java.util.HashSet<>(java.util.Arrays.asList(
                     "com.pluskeymap.app",
-                    "com.paget96.batteryguru",
-                    "com.android.systemui"
+                    "com.paget96.batteryguru"
             ));
 
     private void updateForegroundPackage(String pkg, String source) {
@@ -388,6 +408,7 @@ public class LogcatWatcher implements Runnable {
 
         Log.d(TAG, "parseForegroundPackage [" + source + "]: " + pkg);
         sForegroundPackage = pkg;
+        sForegroundPackageTimestamp = System.currentTimeMillis();
     }
 
     private void handleKeyLine() {

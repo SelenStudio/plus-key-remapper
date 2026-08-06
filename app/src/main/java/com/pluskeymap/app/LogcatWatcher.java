@@ -357,11 +357,37 @@ public class LogcatWatcher implements Runnable {
                 || (c >= '0' && c <= '9') || c == '_' || c == '.';
     }
 
+    /**
+     * Packages that appear in logcat constantly due to background services,
+     * notifications, or overlay activity — NOT because they are in the foreground.
+     * These are blocked from overwriting a real foreground package.
+     *
+     * com.pluskeymap.app    — our own app: appears in pkg= lines whenever we
+     *                         dispatch a key, immediately after the camera shutter.
+     * com.paget96.batteryguru — battery overlay that emits pkg= lines every ~5s
+     *                         from its notification/tile update service.
+     * com.android.systemui  — status bar / notification shade updates constantly.
+     */
+    private static final java.util.Set<String> BACKGROUND_NOISE_PACKAGES =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "com.pluskeymap.app",
+                    "com.paget96.batteryguru",
+                    "com.android.systemui"
+            ));
+
     private void updateForegroundPackage(String pkg, String source) {
-        if (!pkg.equals(sForegroundPackage)) {
-            Log.d(TAG, "parseForegroundPackage [" + source + "]: " + pkg);
-            sForegroundPackage = pkg;
+        if (pkg.equals(sForegroundPackage)) return; // no change
+
+        // Block known background-noise packages from overwriting a real foreground
+        // package. These appear in logcat constantly from services and overlays but
+        // are never actually foregrounded by the user.
+        if (BACKGROUND_NOISE_PACKAGES.contains(pkg)) {
+            // Exception: allow them through if we have NO package yet (startup).
+            if (sForegroundPackage != null) return;
         }
+
+        Log.d(TAG, "parseForegroundPackage [" + source + "]: " + pkg);
+        sForegroundPackage = pkg;
     }
 
     private void handleKeyLine() {

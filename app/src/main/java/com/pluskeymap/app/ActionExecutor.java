@@ -527,41 +527,74 @@ public class ActionExecutor {
     }
 
     /**
-     * Dispatches KEYCODE_CAMERA (or any media key) to the foreground app.
+     * Dispatches a key event to the foreground app.
      *
-     * Strategy: AudioManager.dispatchMediaKeyEvent() is the correct public API
-     * for dispatching hardware-button-equivalent key events from a background
-     * service. This is exactly the path the Android framework itself uses when
-     * a physical camera button or headset button is pressed — no special
-     * permissions are required beyond what the app already holds.
+     * For KEYCODE_CAMERA: uses Intent.ACTION_CAMERA_BUTTON ordered broadcast
+     * with the KeyEvent as an extra — the exact sequence Android sends from a
+     * physical camera button (PhoneWindowManager.interceptKeyBeforeQueueing).
+     * OxygenOS camera registers a BroadcastReceiver for this action.
+     * AudioManager.dispatchMediaKeyEvent(KEYCODE_CAMERA) is silently ignored
+     * because OxygenOS camera does not register a MediaSession for it.
      *
-     * InputManager.injectInputEvent() was the previous approach but is blocked
-     * on OxygenOS 15 with an InvocationTargetException (SecurityException at
-     * runtime) because INJECT_EVENTS is a signature-level permission that
-     * SYSTEM_ALERT_WINDOW does NOT substitute for. dispatchMediaKeyEvent has
-     * no such restriction and is the documented, stable replacement.
-     *
-     * KEYCODE_CAMERA is classified as a media key by AudioManager and is
-     * routed to the MediaSession of the foreground app, which is how the
-     * OxygenOS camera app expects to receive shutter button events.
+     * For all other keys: AudioManager.dispatchMediaKeyEvent() is correct and
+     * routes to the active MediaSession without needing INJECT_EVENTS.
      */
     private void injectKey(int keyCode) {
-        AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-        if (am == null) {
-            Log.w(TAG, "injectKey: AudioManager unavailable");
-            return;
+        if (keyCode == KeyEvent.KEYCODE_CAMERA) {
+            dispatchCameraButton();
+        } else {
+            dispatchMediaKey(keyCode);
         }
+    }
+
+    private void dispatchCameraButton() {
+        long downTime = SystemClock.uptimeMillis();
+        KeyEvent down = new KeyEvent(downTime, downTime,
+                KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_CAMERA, 0,
+                0, -1, 0, KeyEvent.FLAG_FROM_SYSTEM);
+        KeyEvent up = new KeyEvent(downTime, SystemClock.uptimeMillis(),
+                KeyEvent.ACTION_UP, KeyEvent.KEYCODE_CAMERA, 0,
+                0, -1, 0, KeyEvent.FLAG_FROM_SYSTEM);
+
+        // Send ACTION_CAMERA_BUTTON as ordered broadcast to the camera package.
+        // This matches the exact intent Android dispatches from physical camera buttons.
+        try {
+            String camPkg = LogcatWatcher.getForegroundPackage();
+
+            Intent downIntent = new Intent(Intent.ACTION_CAMERA_BUTTON);
+            downIntent.putExtra(Intent.EXTRA_KEY_EVENT, down);
+            downIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            if (camPkg != null) downIntent.setPackage(camPkg);
+            context.sendOrderedBroadcast(downIntent, null);
+
+            Intent upIntent = new Intent(Intent.ACTION_CAMERA_BUTTON);
+            upIntent.putExtra(Intent.EXTRA_KEY_EVENT, up);
+            upIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            if (camPkg != null) upIntent.setPackage(camPkg);
+            context.sendOrderedBroadcast(upIntent, null);
+
+            Log.d(TAG, "dispatchCameraButton: ACTION_CAMERA_BUTTON sent to "
+                    + (camPkg != null ? camPkg : "broadcast"));
+        } catch (Exception e) {
+            Log.w(TAG, "dispatchCameraButton: failed (" + e.getClass().getSimpleName()
+                    + "): " + e.getMessage() + " — falling back to AudioManager");
+            dispatchMediaKey(KeyEvent.KEYCODE_CAMERA);
+        }
+    }
+
+    private void dispatchMediaKey(int keyCode) {
+        AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) { Log.w(TAG, "dispatchMediaKey: AudioManager null"); return; }
         try {
             long downTime = SystemClock.uptimeMillis();
             am.dispatchMediaKeyEvent(new KeyEvent(downTime, downTime,
                     KeyEvent.ACTION_DOWN, keyCode, 0));
             am.dispatchMediaKeyEvent(new KeyEvent(downTime, SystemClock.uptimeMillis(),
                     KeyEvent.ACTION_UP, keyCode, 0));
-            Log.d(TAG, "injectKey: KEYCODE=" + keyCode + " dispatched via AudioManager");
+            Log.d(TAG, "dispatchMediaKey: KEYCODE=" + keyCode + " dispatched");
         } catch (Exception e) {
-            Log.w(TAG, "injectKey: dispatch failed (" + e.getClass().getSimpleName()
-                    + "): " + e.getMessage()
-                    + (e.getCause() != null ? " cause=" + e.getCause().getMessage() : ""));
+            Log.w(TAG, "dispatchMediaKey: failed (" + e.getClass().getSimpleName()
+                    + "): " + e.getMessage());
         }
     }
 

@@ -395,12 +395,15 @@ public class ActionExecutor {
     /**
      * Injects a key DOWN + UP pair via InputManager reflection.
      *
-     * InputManager.injectInputEvent() is a hidden API (available since API 16)
-     * that requires INJECT_EVENTS permission or SYSTEM_ALERT_WINDOW on OxygenOS.
-     * We already hold SYSTEM_ALERT_WINDOW (granted via ADB during setup), so this
-     * works without root. The inject mode INJECT_INPUT_EVENT_MODE_ASYNC is used to
-     * avoid blocking the calling thread -- the camera app's touch handler is
-     * decoupled from our service.
+     * InputManager.injectInputEvent() is a hidden API that requires INJECT_EVENTS
+     * permission or SYSTEM_ALERT_WINDOW on OxygenOS. We already hold
+     * SYSTEM_ALERT_WINDOW (granted via ADB during setup), so this works without
+     * root. The inject mode INJECT_INPUT_EVENT_MODE_ASYNC (0) is used to avoid
+     * blocking the calling thread.
+     *
+     * InputManager.getInstance() was removed from the public API surface in
+     * SDK 35. We obtain the instance via Context.getSystemService(INPUT_SERVICE)
+     * instead, which is stable across all supported API levels.
      */
     private void injectKey(int keyCode) {
         try {
@@ -420,13 +423,21 @@ public class ActionExecutor {
                     KeyEvent.FLAG_FROM_SYSTEM,
                     InputDevice.SOURCE_KEYBOARD);
 
-            Object inputManager = android.hardware.input.InputManager.getInstance();
+            // Context.INPUT_SERVICE ("input") is the stable way to get InputManager
+            // on SDK 35+. InputManager.getInstance() was a hidden static accessor
+            // that the compiler no longer resolves against the public API stubs.
+            Object inputManager = context.getSystemService(Context.INPUT_SERVICE);
+            if (inputManager == null) {
+                Log.w(TAG, "injectKey: INPUT_SERVICE unavailable");
+                return;
+            }
+
             java.lang.reflect.Method inject = inputManager.getClass()
                     .getMethod("injectInputEvent",
                             android.view.InputEvent.class, int.class);
             inject.setAccessible(true);
 
-            // INJECT_INPUT_EVENT_MODE_ASYNC = 0 -- fire-and-forget, non-blocking
+            // INJECT_INPUT_EVENT_MODE_ASYNC = 0, fire-and-forget, non-blocking
             inject.invoke(inputManager, down, 0);
             inject.invoke(inputManager, up,   0);
 

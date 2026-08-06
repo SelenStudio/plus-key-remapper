@@ -22,15 +22,19 @@ import java.util.Set;
  *   1. Screenshot via performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT).
  *
  *   2. Camera shutter by clicking the shutter button node in the camera UI.
- *      InputManager.injectInputEvent() is permanently blocked on OxygenOS 15
- *      (Android 15 / API 35) even from an a11y process — SecurityException is
- *      thrown regardless. The correct unblocked path is node-based interaction:
- *      find the shutter button in the accessibility tree and call
- *      performAction(ACTION_CLICK). This is exactly what TalkBack does and
- *      requires no special permission beyond canRetrieveWindowContent.
  *
- * Shutter is triggered via a local broadcast (ACTION_INJECT_SHUTTER) to avoid
- * process-restart timing races with static field access.
+ * InputManager.injectInputEvent() is permanently blocked on OxygenOS 15
+ * (Android 15 / API 35) even from an a11y process. The correct unblocked
+ * path is node-based interaction: find the shutter button in the
+ * accessibility tree via content-description or resource-id and call
+ * performAction(ACTION_CLICK). This is the same mechanism TalkBack uses
+ * and requires no permissions beyond canRetrieveWindowContent.
+ *
+ * Confirmed working on OxygenOS 15: the OxygenOS camera shutter button
+ * has content-description = "Shutter" button (no resource-id).
+ *
+ * Shutter is triggered via a local broadcast (ACTION_INJECT_SHUTTER) sent
+ * by ActionExecutor, avoiding process-restart timing races.
  */
 public class PlusKeyService extends AccessibilityService {
 
@@ -50,15 +54,10 @@ public class PlusKeyService extends AccessibilityService {
     public static volatile PlusKeyService instance = null;
 
     /**
-     * Resource-id fragments and content-description fragments that identify the
-     * shutter button in the OxygenOS / OPPO camera UI.
-     *
-     * Strategy: walk every window's node tree and click the first node whose
-     * resource-id or content-description matches any of these strings.
-     * Add new strings here as OEM variants are discovered.
+     * Resource-id fragments that identify the shutter button.
+     * Matched case-insensitively via String.contains().
      */
     private static final Set<String> SHUTTER_ID_FRAGMENTS = new HashSet<>(Arrays.asList(
-            // OxygenOS / ColorOS / OPPO camera
             "shutter",
             "btn_shutter",
             "capture",
@@ -69,6 +68,13 @@ public class PlusKeyService extends AccessibilityService {
             "photo_button"
     ));
 
+    /**
+     * Content-description fragments that identify the shutter button.
+     * Matched case-insensitively via String.contains().
+     *
+     * OxygenOS 15 camera uses content-description = "Shutter" button
+     * (no resource-id on the node), confirmed in production.
+     */
     private static final Set<String> SHUTTER_DESC_FRAGMENTS = new HashSet<>(Arrays.asList(
             "shutter",
             "take photo",
@@ -117,18 +123,18 @@ public class PlusKeyService extends AccessibilityService {
     // ─── Shutter click via accessibility node tree ────────────────────────────
 
     /**
-     * Walks every accessible window and clicks the first node that looks like
-     * a camera shutter button. No injection, no hidden APIs, no permissions
-     * beyond canRetrieveWindowContent (already declared in the a11y config).
+     * Walks every accessible window and clicks the first node that matches
+     * a known camera shutter button descriptor. No injection, no hidden APIs,
+     * no permissions beyond canRetrieveWindowContent.
      *
-     * Returns true if a node was found and clicked.
+     * OxygenOS 15: shutter button has no resource-id; matched via
+     * content-description "Shutter" button (desc fragment: "shutter").
      */
-    private boolean clickShutterButton() {
+    private void clickShutterButton() {
         List<AccessibilityWindowInfo> windows = getWindows();
         if (windows == null || windows.isEmpty()) {
-            Log.w(TAG, "clickShutter: no accessible windows");
-            // Fall back to global KEYCODE_VOLUME_DOWN via performGlobalAction
-            return performVolumeDownGlobal();
+            Log.w(TAG, "clickShutter: no accessible windows — is the a11y service enabled?");
+            return;
         }
 
         for (AccessibilityWindowInfo window : windows) {
@@ -138,24 +144,26 @@ public class PlusKeyService extends AccessibilityService {
                 AccessibilityNodeInfo shutter = findShutterNode(root);
                 if (shutter != null) {
                     boolean clicked = shutter.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                    Log.d(TAG, "clickShutter: performAction(CLICK) on ["
-                            + shutter.getViewIdResourceName() + "] / ["
-                            + shutter.getContentDescription() + "] -> " + clicked);
+                    Log.d(TAG, "clickShutter: performAction(CLICK)"
+                            + " id=[" + shutter.getViewIdResourceName() + "]"
+                            + " desc=[" + shutter.getContentDescription() + "]"
+                            + " -> " + clicked);
                     shutter.recycle();
-                    root.recycle();
-                    return clicked;
+                    return;
                 }
             } finally {
                 root.recycle();
             }
         }
 
-        Log.w(TAG, "clickShutter: no shutter node found in any window — fallback to volume-down");
-        return performVolumeDownGlobal();
+        // No shutter node found — dump the window tree once so we can identify
+        // the correct descriptor and add it to the fragment sets above.
+        Log.w(TAG, "clickShutter: no shutter node found — dumping window tree for diagnosis");
+        dumpWindowTree();
     }
 
     /**
-     * Recursively searches the node tree for a shutter button.
+     * Recursively DFS-searches the node tree for a shutter button node.
      * Caller is responsible for recycling the returned node.
      */
     private AccessibilityNodeInfo findShutterNode(AccessibilityNodeInfo node) {
@@ -178,7 +186,8 @@ public class PlusKeyService extends AccessibilityService {
 
     /**
      * Returns true if this node looks like a camera shutter button.
-     * Checks resource-id and content-description against known fragments.
+     * Checks clickability, then resource-id and content-description against
+     * known OEM fragment sets.
      */
     private boolean isShutterNode(AccessibilityNodeInfo node) {
         if (!node.isClickable()) return false;
@@ -209,24 +218,9 @@ public class PlusKeyService extends AccessibilityService {
     }
 
     /**
-     * Last-resort fallback: if the window tree yields no shutter node,
-     * try GLOBAL_ACTION_KEYCODE_HEADSETHOOK (some camera apps handle it)
-     * or log clearly that manual ADB grant is needed.
-     *
-     * Note: GLOBAL_ACTION_TAKE_SCREENSHOT is intentionally NOT used here —
-     * it would take a screenshot instead of triggering the shutter.
-     */
-    private boolean performVolumeDownGlobal() {
-        // Log node tree for debugging so we can identify the correct view id.
-        dumpWindowTree();
-        Log.w(TAG, "performVolumeDownGlobal: no shutter node — check dump above to find "
-                + "the correct shutter button id and add it to SHUTTER_ID_FRAGMENTS");
-        return false;
-    }
-
-    /**
-     * Dumps the first camera window's accessibility tree to logcat so the
-     * correct shutter button resource-id can be identified and added above.
+     * Dumps the full accessibility window tree to logcat.
+     * Only called when no shutter node was found, to aid diagnosis.
+     * Look for clickable nodes near the bottom of the camera UI.
      */
     private void dumpWindowTree() {
         try {
@@ -236,8 +230,9 @@ public class PlusKeyService extends AccessibilityService {
                 AccessibilityNodeInfo root = window.getRoot();
                 if (root == null) continue;
                 try {
-                    Log.d(TAG, "=== WINDOW DUMP (pkg=" + root.getPackageName() + ") ===");
+                    Log.d(TAG, "=== WINDOW DUMP pkg=" + root.getPackageName() + " ===");
                     dumpNode(root, 0);
+                    Log.d(TAG, "=== END WINDOW DUMP ===");
                 } finally {
                     root.recycle();
                 }
@@ -248,14 +243,16 @@ public class PlusKeyService extends AccessibilityService {
     }
 
     private void dumpNode(AccessibilityNodeInfo node, int depth) {
-        if (node == null || depth > 8) return;
-        String indent = new String(new char[depth * 2]).replace('\0', ' ');
-        Log.d(TAG, indent
-                + "cls=" + node.getClassName()
-                + " id=" + node.getViewIdResourceName()
-                + " desc=" + node.getContentDescription()
-                + " click=" + node.isClickable()
-                + " vis=" + node.isVisibleToUser());
+        if (node == null || depth > 10) return;
+        String indent = depth > 0 ? new String(new char[depth * 2]).replace('\0', ' ') : "";
+        if (node.isClickable() || node.getContentDescription() != null) {
+            Log.d(TAG, indent
+                    + "cls=" + node.getClassName()
+                    + " id=" + node.getViewIdResourceName()
+                    + " desc=[" + node.getContentDescription() + "]"
+                    + " click=" + node.isClickable()
+                    + " vis=" + node.isVisibleToUser());
+        }
         int count = node.getChildCount();
         for (int i = 0; i < count; i++) {
             AccessibilityNodeInfo child = node.getChild(i);

@@ -25,6 +25,7 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.snackbar.Snackbar;
+import com.google.android.material.switchmaterial.SwitchMaterial;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -73,6 +74,10 @@ public class MainActivity extends AppCompatActivity {
     // Binding rows
     private TextView tvSingleLabel;
     private TextView tvLongLabel;
+
+    // Camera shutter card
+    private MaterialCardView cardCameraShutter;
+    private SwitchMaterial   switchCameraShutter;
 
     private final BroadcastReceiver keyReceiver = new BroadcastReceiver() {
         @Override
@@ -229,6 +234,10 @@ public class MainActivity extends AppCompatActivity {
         tvSingleLabel = findViewById(R.id.tvSingleLabel);
         tvLongLabel   = findViewById(R.id.tvLongLabel);
 
+        cardCameraShutter  = findViewById(R.id.cardCameraShutter);
+        switchCameraShutter = findViewById(R.id.switchCameraShutter);
+        bindCameraShutterCard();
+
         ImageButton btnSettings = findViewById(R.id.btnSettings);
         btnSettings.setOnClickListener(v ->
                 startActivity(new Intent(this, SettingsActivity.class)));
@@ -301,6 +310,56 @@ public class MainActivity extends AppCompatActivity {
         // overriding clickable=false.
     }
 
+    // ── Camera shutter card ──────────────────────────────────────────────────
+
+    /**
+     * Initialises the camera shutter toggle card.
+     *
+     * The card stores its enabled state in pkm_settings under the key
+     * KEY_CAMERA_SHUTTER_ENABLED. When toggled on, single-tap presses are
+     * intercepted by ActionExecutor.executeForSingleTap() and redirected to
+     * KEYCODE_CAMERA whenever a camera app is in the foreground. The normal
+     * single-tap binding still fires in every other app.
+     */
+    private void bindCameraShutterCard() {
+        SharedPreferences settings = getSharedPreferences(
+                SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE);
+        boolean enabled = settings.getBoolean(
+                ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, false);
+        switchCameraShutter.setChecked(enabled);
+
+        // Tapping anywhere on the card toggles the switch
+        cardCameraShutter.setOnClickListener(v -> {
+            boolean nowEnabled = !switchCameraShutter.isChecked();
+            switchCameraShutter.setChecked(nowEnabled);
+            getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, nowEnabled)
+                    .apply();
+            Snackbar.make(
+                    findViewById(android.R.id.content),
+                    nowEnabled
+                            ? "Camera shutter enabled -- works inside camera apps only"
+                            : "Camera shutter disabled",
+                    Snackbar.LENGTH_SHORT).show();
+        });
+
+        // Let the switch itself toggle without double-firing via the card click
+        switchCameraShutter.setOnClickListener(v -> {
+            boolean nowEnabled = switchCameraShutter.isChecked();
+            getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, nowEnabled)
+                    .apply();
+            Snackbar.make(
+                    findViewById(android.R.id.content),
+                    nowEnabled
+                            ? "Camera shutter enabled -- works inside camera apps only"
+                            : "Camera shutter disabled",
+                    Snackbar.LENGTH_SHORT).show();
+        });
+    }
+
     // ── Single-only mode ─────────────────────────────────────────────────────
 
     private void applySingleOnlyMode() {
@@ -353,7 +412,7 @@ public class MainActivity extends AppCompatActivity {
             if (btnReopen != null) btnReopen.setText("Complete Setup");
         }
 
-        int[] grayIds = { R.id.cardDetector, R.id.cardBindings };
+        int[] grayIds = { R.id.cardDetector, R.id.cardBindings, R.id.cardCameraShutter };
         float alpha  = showBanner ? 0.3f : 1.0f;
         boolean enable = !showBanner;
         for (int id : grayIds) {
@@ -405,7 +464,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void runEntranceAnimation() {
         int[] ids = { R.id.cardSetupBanner, R.id.cardStatus,
-                R.id.cardDetector, R.id.cardBindings };
+                R.id.cardDetector, R.id.cardBindings, R.id.cardCameraShutter };
         for (int i = 0; i < ids.length; i++) {
             View v = findViewById(ids[i]);
             if (v == null || v.getVisibility() == View.GONE) continue;

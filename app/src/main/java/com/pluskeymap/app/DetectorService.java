@@ -341,10 +341,19 @@ public class DetectorService extends Service {
         String launchPkg    = prefs.getString(pkgKey, "");
         String customIntent = prefs.getString(intentKey, "");
         logd("Executing action=" + action + " pkg=" + launchPkg);
-        executor.execute(action, launchPkg, customIntent);
+
+        // Single-tap passes through executeForSingleTap so the camera shutter
+        // override can intercept it when a camera app is in the foreground.
+        boolean isSingleTap = ActionExecutor.KEY_ACTION_SINGLE.equals(prefKey);
+        if (isSingleTap) {
+            executor.executeForSingleTap(action, launchPkg, customIntent);
+        } else {
+            executor.execute(action, launchPkg, customIntent);
+        }
+
         // Re-signal foreground liveness to OxygenOS after every action.
         // OxygenOS uses the camera-resource release (e.g. torch off) as a
-        // kill trigger — refreshing the foreground notification resets its
+        // kill trigger -- refreshing the foreground notification resets its
         // idle timer and prevents the ~44s post-action kill.
         refreshForegroundNotification();
     }

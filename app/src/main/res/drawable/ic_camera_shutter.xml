@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Camera shutter / aperture icon.
+  A simple circle with an inner ring and a small centre dot -- universally
+  recognised as a camera shutter symbol without depending on any third-party
+  icon library.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Outer ring -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="2"
+        android:pathData="M12,2 A10,10 0 1 1 11.9999,2 Z" />
+
+    <!-- Inner ring (aperture blades suggestion) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.5"
+        android:pathData="M12,6 A6,6 0 1 1 11.9999,6 Z" />
+
+    <!-- Centre dot -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M12,10.5 A1.5,1.5 0 1 1 11.9999,10.5 Z" />
+
+</vector>

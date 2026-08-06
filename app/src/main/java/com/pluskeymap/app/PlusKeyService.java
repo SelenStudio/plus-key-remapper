@@ -80,7 +80,9 @@ public class PlusKeyService extends AccessibilityService {
             "take photo",
             "take picture",
             "capture",
-            "shoot"
+            "shoot",
+            "video recording button",
+            "record"
     ));
 
     private final BroadcastReceiver shutterReceiver = new BroadcastReceiver() {

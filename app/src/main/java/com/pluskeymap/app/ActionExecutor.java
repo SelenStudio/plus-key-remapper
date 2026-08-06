@@ -418,39 +418,57 @@ public class ActionExecutor {
                     + " (no ActivityManager lines captured - camera opened before service started?)");
         }
 
-        // --- Tier 2: UsageStatsManager (10-second window) ---
+        // --- Tier 2: UsageStatsManager (60-second window, two query styles) ---
         try {
             UsageStatsManager usm = (UsageStatsManager)
                     context.getSystemService(Context.USAGE_STATS_SERVICE);
             if (usm != null) {
-                long now   = System.currentTimeMillis();
-                long begin = now - 10_000; // 10-second window
-                Map<String, UsageStats> statsMap = usm.queryAndAggregateUsageStats(begin, now);
-                Log.d(TAG, "isCameraAppInForeground [T2-usage]: statsMap size=" + statsMap.size());
+                long now = System.currentTimeMillis();
+
+                // Primary: queryAndAggregateUsageStats over the last 60 seconds.
+                Map<String, UsageStats> statsMap =
+                        usm.queryAndAggregateUsageStats(now - 60_000, now);
+                Log.d(TAG, "isCameraAppInForeground [T2-usage]: aggregate(60s) size="
+                        + statsMap.size());
+
+                // Fallback: queryUsageStats(INTERVAL_BEST) returns data on some
+                // OEM builds even without the full permission grant.
+                if (statsMap.isEmpty()) {
+                    List<android.app.usage.UsageStats> statsList = usm.queryUsageStats(
+                            UsageStatsManager.INTERVAL_BEST, now - 60_000, now);
+                    Log.d(TAG, "isCameraAppInForeground [T2-usage]: queryBest(60s) size="
+                            + (statsList != null ? statsList.size() : "null"));
+                    if (statsList != null) {
+                        for (android.app.usage.UsageStats s : statsList) {
+                            statsMap.put(s.getPackageName(), s);
+                        }
+                    }
+                }
+
                 if (!statsMap.isEmpty()) {
-                    // Find the package with the most recent lastTimeUsed
-                    String topPkg = null;
-                    long topTime  = 0;
+                    String topPkg  = null;
+                    long   topTime = 0;
                     for (Map.Entry<String, UsageStats> e : statsMap.entrySet()) {
                         long t = e.getValue().getLastTimeUsed();
-                        Log.d(TAG, "isCameraAppInForeground [T2-usage]: pkg=" + e.getKey()
-                                + " lastUsed=" + t);
+                        if (isCameraPackage(e.getKey())) {
+                            Log.d(TAG, "isCameraAppInForeground [T2-usage]: CAMERA pkg="
+                                    + e.getKey() + " lastUsed=" + t + " now=" + now);
+                        }
                         if (t > topTime) { topTime = t; topPkg = e.getKey(); }
                     }
                     Log.d(TAG, "isCameraAppInForeground [T2-usage]: topPkg=" + topPkg
-                            + " topTime=" + topTime + " now=" + now);
+                            + " delta=" + (now - topTime) + "ms");
                     if (topPkg != null) {
                         boolean match = isCameraPackage(topPkg);
                         Log.d(TAG, "isCameraAppInForeground [T2-usage]: isCameraPackage=" + match);
                         if (match) return true;
                     }
                 } else {
-                    Log.d(TAG, "isCameraAppInForeground [T2-usage]: empty result"
-                            + " (PACKAGE_USAGE_STATS not granted? grant via:"
-                            + " adb shell appops set com.pluskeymap.app GET_USAGE_STATS allow)");
+                    Log.w(TAG, "isCameraAppInForeground [T2-usage]: both queries empty."
+                            + " Run: adb shell appops set com.pluskeymap.app GET_USAGE_STATS allow");
                 }
             } else {
-                Log.w(TAG, "isCameraAppInForeground [T2-usage]: UsageStatsManager unavailable");
+                Log.w(TAG, "isCameraAppInForeground [T2-usage]: UsageStatsManager null");
             }
         } catch (Exception e) {
             Log.w(TAG, "isCameraAppInForeground [T2-usage]: exception: " + e.getMessage());

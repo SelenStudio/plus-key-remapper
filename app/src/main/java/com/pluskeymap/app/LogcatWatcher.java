@@ -238,57 +238,88 @@ public class LogcatWatcher implements Runnable {
     }
 
     /**
-     * Parses ActivityManager logcat lines to track the current foreground package.
+     * Parses logcat lines to track the current foreground package.
      *
-     * Two reliable patterns emitted on every activity launch:
+     * OxygenOS 15 does NOT emit standard ActivityManager "Displayed" or
+     * "START pkg=" lines to third-party logcat readers for all app launches.
+     * Instead we scan ALL incoming lines for four patterns:
      *
-     *   ActivityManager: Displayed com.oneplus.camera/.CameraActivity: +342ms
-     *   ActivityManager: START u0 {act=... pkg=com.oneplus.camera} ...
+     *   1. "Displayed pkg/Activity"   (AOSP ActivityManager standard)
+     *   2. "cmp=pkg/.Activity"        (OxygenOS ActivityTaskManager format)
+     *   3. "pkg=com.example.app"      (intent dump in START lines)
+     *   4. Any line containing a known camera package name substring
+     *      ("camera", "oplus.camera", "oneplus.camera") — catch-all for OEM
      *
-     * Both are present in standard AOSP and OxygenOS. We update sForegroundPackage
-     * on each match so ActionExecutor can query it without any system permission.
+     * We also log every line that contains "camera" (case-insensitive) at DEBUG
+     * level so we can see exactly what OxygenOS emits when the camera opens.
+     * This logging can be removed once the correct pattern is identified.
      */
     private void parseForegroundPackage(String line) {
-        // Only process ActivityManager lines for efficiency
-        if (!line.contains("ActivityManager") && !line.contains("ActivityTaskManager")) return;
+        // DIAGNOSTIC: log any line that mentions camera so we can see what
+        // OxygenOS actually emits when the camera app is launched.
+        if (line.toLowerCase().contains("camera") || line.contains("oplus.camera")
+                || line.contains("oneplus.camera") || line.contains("com.oplus")) {
+            Log.d(TAG, "DIAG camera-line: " + line);
+        }
 
-        // Pattern 1: "Displayed pkg/Activity" or "Displayed pkg/.Activity"
-        // Example: I/ActivityManager: Displayed com.oneplus.camera/.CameraActivity: +342ms
+        // Pattern 1: "Displayed pkg/Activity" — AOSP standard, any tag
         int dispIdx = line.indexOf("Displayed ");
         if (dispIdx >= 0) {
             String rest = line.substring(dispIdx + "Displayed ".length()).trim();
-            // rest starts with "pkg/Activity" or "pkg/.Activity"
             int slashIdx = rest.indexOf('/');
             if (slashIdx > 0) {
                 String pkg = rest.substring(0, slashIdx);
-                if (pkg.contains(".") && !pkg.contains(" ")) {
-                    if (!pkg.equals(sForegroundPackage)) {
-                        Log.d(TAG, "parseForegroundPackage [Displayed]: " + pkg);
-                        sForegroundPackage = pkg;
-                    }
+                if (isValidPackageName(pkg)) {
+                    updateForegroundPackage(pkg, "Displayed");
                     return;
                 }
             }
         }
 
-        // Pattern 2: "START u0 {... pkg=com.example.app}" or "cmp=com.example.app/.Activity"
-        // Example: ActivityManager: START u0 {act=android.intent.action.MAIN ... pkg=com.oneplus.camera} ...
+        // Pattern 2: "cmp=pkg/.Activity" — OxygenOS ActivityTaskManager format
+        // Example: cmp=com.oplus.camera/.CameraActivity
+        int cmpIdx = line.indexOf("cmp=");
+        if (cmpIdx >= 0) {
+            String rest = line.substring(cmpIdx + 4);
+            int slashIdx = rest.indexOf('/');
+            if (slashIdx > 0) {
+                String pkg = rest.substring(0, slashIdx);
+                if (isValidPackageName(pkg)) {
+                    updateForegroundPackage(pkg, "cmp=");
+                    return;
+                }
+            }
+        }
+
+        // Pattern 3: "pkg=com.example.app" in START intent dumps
         int pkgIdx = line.indexOf("pkg=");
         if (pkgIdx >= 0) {
             String rest = line.substring(pkgIdx + 4);
-            // Trim at first whitespace, '}', or end-of-string
             int end = rest.length();
             for (int i = 0; i < rest.length(); i++) {
                 char c = rest.charAt(i);
-                if (c == ' ' || c == '}' || c == '\t' || c == '\n') { end = i; break; }
-            }
-            String pkg = rest.substring(0, end).trim();
-            if (pkg.contains(".") && !pkg.isEmpty() && !pkg.contains(" ")) {
-                if (!pkg.equals(sForegroundPackage)) {
-                    Log.d(TAG, "parseForegroundPackage [pkg=]: " + pkg);
-                    sForegroundPackage = pkg;
+                if (c == ' ' || c == '}' || c == '\t' || c == '\n' || c == ',') {
+                    end = i;
+                    break;
                 }
             }
+            String pkg = rest.substring(0, end).trim();
+            if (isValidPackageName(pkg)) {
+                updateForegroundPackage(pkg, "pkg=");
+            }
+        }
+    }
+
+    /** Returns true if the string looks like a valid Android package name. */
+    private boolean isValidPackageName(String s) {
+        return s != null && !s.isEmpty() && s.contains(".") && !s.contains(" ")
+                && !s.contains("/") && s.length() < 128;
+    }
+
+    private void updateForegroundPackage(String pkg, String source) {
+        if (!pkg.equals(sForegroundPackage)) {
+            Log.d(TAG, "parseForegroundPackage [" + source + "]: " + pkg);
+            sForegroundPackage = pkg;
         }
     }
 

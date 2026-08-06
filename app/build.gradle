@@ -10,8 +10,8 @@ android {
         applicationId "com.pluskeymap.app"
         minSdk 26
         targetSdk 35
-        versionCode 6
-        versionName "1.5"
+        versionCode 5
+        versionName "1.4"
     }
 
     buildTypes {
@@ -44,7 +44,4 @@ dependencies {
     // FIX: WorkManager for periodic keepalive — OxygenOS honours WorkManager
     // constraints better than raw AlarmManager for background apps.
     implementation 'androidx.work:work-runtime:2.9.1'
-    // Shizuku — grants READ_LOGS without a PC after the one-time Shizuku ADB setup
-    implementation 'dev.rikka.shizuku:api:13.1.5'
-    implementation 'dev.rikka.shizuku:provider:13.1.5'
 }

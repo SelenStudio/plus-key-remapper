@@ -573,29 +573,18 @@ public class ActionExecutor {
      *      case some future OEM fork observes volume-change callbacks.
      */
     private void dispatchCameraButton() {
-        // S1: Inject KEYCODE_VOLUME_DOWN via the AccessibilityService process.
-        // AccessibilityService.injectInputEvent() bypasses the INJECT_EVENTS gate.
-        PlusKeyService a11y = PlusKeyService.instance;
-        if (a11y != null) {
-            boolean ok = a11y.injectVolumeDown();
-            Log.d(TAG, "dispatchCameraButton [S1-a11y]: injectVolumeDown=" + ok);
-            if (ok) return;
-        } else {
-            Log.w(TAG, "dispatchCameraButton [S1-a11y]: AccessibilityService not connected."
-                    + " Enable \"Plus Key Remapper\" in Settings > Accessibility.");
-        }
-
-        // S2: Dead-end fallback — confirmed ineffective on OxygenOS 15.
-        try {
-            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, 0);
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0);
-                Log.d(TAG, "dispatchCameraButton [S2-fallback]: adjustStreamVolume LOWER+RAISE sent");
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "dispatchCameraButton [S2-fallback]: " + e.getMessage());
-        }
+        // Send a local broadcast to PlusKeyService (AccessibilityService).
+        // The a11y service registers a receiver in onServiceConnected and performs
+        // InputManager.injectInputEvent() from within its elevated process context.
+        //
+        // Using a broadcast instead of PlusKeyService.instance avoids the race where
+        // the process restarts and the a11y service hasn't re-bound yet — instance
+        // would be null even though the service is enabled in Settings.
+        Intent shutterIntent = new Intent(PlusKeyService.ACTION_INJECT_SHUTTER);
+        shutterIntent.setPackage(context.getPackageName());
+        context.sendBroadcast(shutterIntent);
+        Log.d(TAG, "dispatchCameraButton: broadcast ACTION_INJECT_SHUTTER sent"
+                + " (a11yConnected=" + (PlusKeyService.instance != null) + ")");
     }
 
     private void dispatchMediaKey(int keyCode) {

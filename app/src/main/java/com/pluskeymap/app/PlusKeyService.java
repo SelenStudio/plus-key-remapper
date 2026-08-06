@@ -1,41 +1,77 @@
 package com.pluskeymap.app;
 
 import android.accessibilityservice.AccessibilityService;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 
+import java.lang.reflect.Method;
+
 /**
- * Accessibility service used for two purposes:
+ * Accessibility service with two responsibilities:
  *
  *   1. Screenshot via performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT).
  *
- *   2. Camera shutter injection: injectInputEvent() called from within an
- *      AccessibilityService process is granted elevated privileges by Android
- *      and does NOT require the signature-level INJECT_EVENTS permission.
- *      This is the only reliable path to deliver a KEYCODE_VOLUME_DOWN event
- *      to OxygenOS camera from a third-party app without root.
+ *   2. Camera shutter injection: InputManager.injectInputEvent() works from an
+ *      AccessibilityService process without INJECT_EVENTS because Android grants
+ *      input injection rights to a11y services automatically. A regular
+ *      ForegroundService gets SecurityException for the exact same call.
  *
- * Key detection is handled by DetectorService / LogcatWatcher — this service
- * does not intercept the Plus Key itself; it only provides the injection sink.
+ * Injection is triggered via a local broadcast (ACTION_INJECT_SHUTTER) rather
+ * than a direct static-field call, which eliminates timing races where the a11y
+ * service hasn't yet re-bound after a process restart.
  */
 public class PlusKeyService extends AccessibilityService {
 
     private static final String TAG = "PKM_A11yService";
 
+    /** Sent by ActionExecutor to request a KEYCODE_VOLUME_DOWN injection. */
+    public static final String ACTION_INJECT_SHUTTER = "com.pluskeymap.app.INJECT_SHUTTER";
+
     public static final String ACTION_KEY_DETECTED = "com.pluskeymap.KEY_DETECTED";
     public static final String EXTRA_KEYCODE       = "keycode";
     public static final String EXTRA_ACTION        = "action";
 
-    /** Live instance — non-null when the user has enabled the accessibility service. */
+    /**
+     * Kept for screenshot action only. Never used for shutter injection —
+     * use the broadcast path instead to avoid process-restart timing races.
+     */
     public static volatile PlusKeyService instance = null;
+
+    /** Cached reflected injectInputEvent method — resolved once at connect time. */
+    private Method injectMethod = null;
+    private Object inputManager = null;
+
+    private final BroadcastReceiver shutterReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (ACTION_INJECT_SHUTTER.equals(intent.getAction())) {
+                Log.d(TAG, "shutterReceiver: received ACTION_INJECT_SHUTTER");
+                injectVolumeDown();
+            }
+        }
+    };
 
     @Override
     protected void onServiceConnected() {
         instance = this;
-        Log.d(TAG, "AccessibilityService connected — camera shutter injection available");
+        resolveInjectMethod();
+
+        IntentFilter filter = new IntentFilter(ACTION_INJECT_SHUTTER);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(shutterReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(shutterReceiver, filter);
+        }
+        Log.d(TAG, "onServiceConnected: a11y service ready, injectMethod="
+                + (injectMethod != null ? "found" : "NOT FOUND"));
     }
 
     @Override
@@ -47,65 +83,56 @@ public class PlusKeyService extends AccessibilityService {
     @Override
     public void onDestroy() {
         instance = null;
-        Log.d(TAG, "AccessibilityService disconnected");
+        try { unregisterReceiver(shutterReceiver); } catch (Exception ignored) {}
+        Log.d(TAG, "onDestroy: a11y service stopped");
         super.onDestroy();
     }
 
     /**
-     * Injects a KEYCODE_VOLUME_DOWN down+up pair into the input dispatcher.
-     *
-     * Called from ActionExecutor when the camera shutter fires and a camera app
-     * is in the foreground. OxygenOS camera maps volume-down to shutter at the
-     * window input level — the same path the physical volume key uses.
-     *
-     * Why this must be called from the AccessibilityService process:
-     *   InputManager.injectInputEvent() requires the caller's process to hold
-     *   elevated input injection rights. Android grants these automatically to
-     *   AccessibilityService processes. A regular ForegroundService gets
-     *   SecurityException for the same call regardless of declared permissions.
-     *
-     * Implementation: use InputManager.getInstance() via reflection — this is
-     * the correct path on API 21+. AccessibilityService does NOT expose its own
-     * injectInputEvent() as a public or even accessible hidden method on API 35;
-     * it internally delegates to InputManager anyway.
-     *
-     * INJECT_EVENTS_SYNC (= 2) is the sync mode that waits for the event to be
-     * delivered before returning. Mode 0 (INJECT_EVENTS_ASYNC) is also valid but
-     * sync gives us a reliable boolean result.
-     *
-     * @return true if both down and up events were accepted by the dispatcher.
+     * Resolve and cache InputManager.injectInputEvent() at connect time so
+     * every shutter press doesn't repeat the hierarchy walk.
      */
-    public boolean injectVolumeDown() {
-        // InputManager.getInstance() is a hidden API unavailable at compile time.
-        // The correct public path is getSystemService(INPUT_SERVICE), which returns
-        // the same InputManager binder. Called from the a11y process the reflection
-        // call succeeds — the elevated injection rights are on the process, not the
-        // method, so SecurityException only fires from non-a11y processes.
+    private void resolveInjectMethod() {
         try {
             Object im = getSystemService(INPUT_SERVICE);
             if (im == null) {
-                Log.w(TAG, "injectVolumeDown: InputManager service null");
-                return false;
+                Log.w(TAG, "resolveInjectMethod: INPUT_SERVICE null");
+                return;
             }
-
-            // Walk the class hierarchy — the method is on InputManager itself,
-            // but getSystemService returns the concrete implementation class.
-            java.lang.reflect.Method inject = null;
             Class<?> cls = im.getClass();
-            while (cls != null && inject == null) {
+            while (cls != null) {
                 try {
-                    inject = cls.getDeclaredMethod("injectInputEvent",
+                    Method m = cls.getDeclaredMethod("injectInputEvent",
                             android.view.InputEvent.class, int.class);
+                    m.setAccessible(true);
+                    injectMethod = m;
+                    inputManager = im;
+                    Log.d(TAG, "resolveInjectMethod: found on " + cls.getName());
+                    return;
                 } catch (NoSuchMethodException ignored) {
                     cls = cls.getSuperclass();
                 }
             }
-            if (inject == null) {
-                Log.w(TAG, "injectVolumeDown: injectInputEvent not found in InputManager hierarchy");
-                return false;
-            }
-            inject.setAccessible(true);
+            Log.w(TAG, "resolveInjectMethod: injectInputEvent not found in hierarchy");
+        } catch (Exception e) {
+            Log.w(TAG, "resolveInjectMethod: " + e.getMessage());
+        }
+    }
 
+    /**
+     * Injects KEYCODE_VOLUME_DOWN into the input dispatcher.
+     * OxygenOS camera maps volume-down to shutter when it holds window focus.
+     */
+    private void injectVolumeDown() {
+        if (injectMethod == null || inputManager == null) {
+            Log.w(TAG, "injectVolumeDown: method not resolved — retrying");
+            resolveInjectMethod();
+            if (injectMethod == null) {
+                Log.w(TAG, "injectVolumeDown: still no method, giving up");
+                return;
+            }
+        }
+        try {
             long t = SystemClock.uptimeMillis();
             KeyEvent down = new KeyEvent(t, t,
                     KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0,
@@ -117,11 +144,9 @@ public class PlusKeyService extends AccessibilityService {
                     KeyEvent.FLAG_FROM_SYSTEM, InputDevice.SOURCE_KEYBOARD);
 
             // INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT = 2
-            boolean downOk = (Boolean) inject.invoke(im, down, 2);
-            boolean upOk   = (Boolean) inject.invoke(im, up,   2);
+            boolean downOk = (Boolean) injectMethod.invoke(inputManager, down, 2);
+            boolean upOk   = (Boolean) injectMethod.invoke(inputManager, up,   2);
             Log.d(TAG, "injectVolumeDown: down=" + downOk + " up=" + upOk);
-            return downOk && upOk;
-
         } catch (Exception e) {
             Throwable cause = (e instanceof java.lang.reflect.InvocationTargetException)
                     ? e.getCause() : e;
@@ -129,7 +154,9 @@ public class PlusKeyService extends AccessibilityService {
                     + (cause != null ? cause.getClass().getSimpleName()
                                     : e.getClass().getSimpleName())
                     + "): " + (cause != null ? cause.getMessage() : e.getMessage()));
-            return false;
+            // Method may have become stale — clear cache so next call re-resolves.
+            injectMethod = null;
+            inputManager = null;
         }
     }
 }

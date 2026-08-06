@@ -318,8 +318,13 @@ public class MainActivity extends AppCompatActivity {
      * The card stores its enabled state in pkm_settings under the key
      * KEY_CAMERA_SHUTTER_ENABLED. When toggled on, single-tap presses are
      * intercepted by ActionExecutor.executeForSingleTap() and redirected to
-     * KEYCODE_CAMERA whenever a camera app is in the foreground. The normal
-     * single-tap binding still fires in every other app.
+     * a node-based accessibility click on the shutter button whenever a camera
+     * app is in the foreground.
+     *
+     * Enabling the feature while the accessibility service is not active shows
+     * a mandatory dialog directing the user to Settings → Accessibility. The
+     * feature is saved as enabled so it activates automatically once the service
+     * is turned on — no need to toggle again after granting access.
      */
     private void bindCameraShutterCard() {
         SharedPreferences settings = getSharedPreferences(
@@ -331,33 +336,85 @@ public class MainActivity extends AppCompatActivity {
         // Tapping anywhere on the card toggles the switch
         cardCameraShutter.setOnClickListener(v -> {
             boolean nowEnabled = !switchCameraShutter.isChecked();
-            switchCameraShutter.setChecked(nowEnabled);
-            getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, nowEnabled)
-                    .apply();
-            Snackbar.make(
-                    findViewById(android.R.id.content),
-                    nowEnabled
-                            ? "Camera shutter enabled - works inside camera apps only"
-                            : "Camera shutter disabled",
-                    Snackbar.LENGTH_SHORT).show();
+            handleCameraShutterToggle(nowEnabled);
         });
 
         // Let the switch itself toggle without double-firing via the card click
         switchCameraShutter.setOnClickListener(v -> {
             boolean nowEnabled = switchCameraShutter.isChecked();
-            getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, nowEnabled)
-                    .apply();
-            Snackbar.make(
-                    findViewById(android.R.id.content),
-                    nowEnabled
-                            ? "Camera shutter enabled - works inside camera apps only"
-                            : "Camera shutter disabled",
-                    Snackbar.LENGTH_SHORT).show();
+            handleCameraShutterToggle(nowEnabled);
         });
+    }
+
+    /**
+     * Applies a camera shutter toggle change.
+     *
+     * If the user is enabling the feature and the accessibility service is not
+     * currently connected, show a dialog explaining why it is required and offer
+     * a direct link to Settings → Accessibility. The preference is still saved
+     * as enabled so it works immediately once the user grants access — they
+     * will not need to come back and toggle again.
+     *
+     * If the user is disabling the feature, apply it silently.
+     */
+    private void handleCameraShutterToggle(boolean nowEnabled) {
+        switchCameraShutter.setChecked(nowEnabled);
+        getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
+                .edit()
+                .putBoolean(ActionExecutor.KEY_CAMERA_SHUTTER_ENABLED, nowEnabled)
+                .apply();
+
+        if (nowEnabled && !isAccessibilityServiceEnabled()) {
+            // Show a blocking dialog — without the a11y service the feature does nothing.
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle("Accessibility Access Required")
+                    .setMessage(
+                            "The camera shutter feature works by clicking the shutter button "
+                            + "in the camera app using Android's Accessibility service.\n\n"
+                            + "Please enable \"Plus Key Remapper\" in:\n"
+                            + "Settings → Accessibility → Installed apps\n\n"
+                            + "The feature is already saved as ON — it will activate "
+                            + "automatically once you grant access.")
+                    .setPositiveButton("Open Accessibility Settings", (d, w) -> {
+                        Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(intent);
+                    })
+                    .setNegativeButton("Later", null)
+                    .setCancelable(true)
+                    .show();
+            return;
+        }
+
+        Snackbar.make(
+                findViewById(android.R.id.content),
+                nowEnabled
+                        ? "Camera shutter enabled — works inside camera apps only"
+                        : "Camera shutter disabled",
+                Snackbar.LENGTH_SHORT).show();
+    }
+
+    /**
+     * Returns true if PlusKeyService (the AccessibilityService) is currently
+     * enabled in system accessibility settings.
+     *
+     * Uses Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES to check whether the
+     * service component is listed — this reflects the Settings toggle state
+     * regardless of whether onServiceConnected has fired yet.
+     */
+    private boolean isAccessibilityServiceEnabled() {
+        String expected = getPackageName() + "/" + PlusKeyService.class.getName();
+        try {
+            String enabled = Settings.Secure.getString(
+                    getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (enabled == null) return false;
+            // The setting is a colon-separated list of component names.
+            for (String component : enabled.split(":")) {
+                if (component.trim().equalsIgnoreCase(expected)) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     // ── Single-only mode ─────────────────────────────────────────────────────

@@ -2,6 +2,8 @@ package com.pluskeymap.app;
 
 import android.app.ActivityManager;
 import android.app.NotificationManager;
+import android.app.usage.UsageStats;
+import android.app.usage.UsageStatsManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -22,6 +24,7 @@ import android.util.Log;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class ActionExecutor {
@@ -106,12 +109,27 @@ public class ActionExecutor {
                 SettingsActivity.PREFS_SETTINGS, Context.MODE_PRIVATE);
         boolean shutterEnabled = settings.getBoolean(KEY_CAMERA_SHUTTER_ENABLED, false);
 
-        if (shutterEnabled && isCameraAppInForeground()) {
-            Log.d(TAG, "executeForSingleTap: camera shutter override active");
+        Log.d(TAG, "executeForSingleTap: action=" + action
+                + " shutterEnabled=" + shutterEnabled
+                + " settingsPrefsName=" + SettingsActivity.PREFS_SETTINGS
+                + " logcatForegroundPkg=" + LogcatWatcher.getForegroundPackage());
+
+        if (!shutterEnabled) {
+            Log.d(TAG, "executeForSingleTap: shutter disabled -> normal execute");
+            execute(action, launchPkg, customIntent);
+            return;
+        }
+
+        boolean cameraInFg = isCameraAppInForeground();
+        Log.d(TAG, "executeForSingleTap: cameraInForeground=" + cameraInFg);
+
+        if (cameraInFg) {
+            Log.d(TAG, "executeForSingleTap: camera shutter override active -> injecting KEYCODE_CAMERA");
             injectKey(KeyEvent.KEYCODE_CAMERA);
             return;
         }
 
+        Log.d(TAG, "executeForSingleTap: camera not in foreground -> normal execute action=" + action);
         execute(action, launchPkg, customIntent);
     }
 
@@ -350,44 +368,143 @@ public class ActionExecutor {
      */
     private void fireCameraShutter() {
         if (!isCameraAppInForeground()) {
-            Log.d(TAG, "fireCameraShutter: foreground app is not a camera -- ignoring");
+            Log.d(TAG, "fireCameraShutter: foreground app is not a camera, ignoring");
             return;
         }
-        Log.d(TAG, "fireCameraShutter: camera app in foreground -- injecting KEYCODE_CAMERA");
+        Log.d(TAG, "fireCameraShutter: camera app in foreground, injecting KEYCODE_CAMERA");
         injectKey(KeyEvent.KEYCODE_CAMERA);
     }
 
     /**
      * Returns true when a camera app is the current foreground process.
      *
-     * Uses ActivityManager.getRunningAppProcesses() and checks importance
-     * IMPORTANCE_FOREGROUND. Matches against KNOWN_CAMERA_PACKAGES first for
-     * accuracy, then falls back to a substring check on the package name for any
-     * app containing "camera" (catches OEM forks and regional variants).
+     * Three-tier detection strategy (Android 10+ getRunningAppProcesses only
+     * returns the caller's own process, so it is useless here):
+     *
+     *   Tier 1 - LogcatWatcher.getForegroundPackage():
+     *     The logcat process already running for key detection also sees
+     *     ActivityManager "Displayed" and "START pkg=" lines on every activity
+     *     launch. LogcatWatcher parses those and stores the last foreground
+     *     package as a volatile static field. No extra permission needed.
+     *
+     *   Tier 2 - UsageStatsManager.queryUsageStats():
+     *     Queries a 10-second window and picks the most-recently-used app.
+     *     Requires PACKAGE_USAGE_STATS. On OxygenOS this is granted alongside
+     *     READ_LOGS in the same ADB session (both are "development" permissions).
+     *     Falls through to Tier 3 if the permission is not held.
+     *
+     *   Tier 3 - ActivityManager.getRunningAppProcesses() (legacy fallback):
+     *     Only returns our own process on Android 10+, but kept as a last
+     *     resort since older devices / custom ROMs may still expose all procs.
+     *
+     * Every tier logs its result so we can trace exactly which path fires and
+     * why the override is or is not triggered.
      */
     private boolean isCameraAppInForeground() {
-        ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-        if (am == null) return false;
+        Log.d(TAG, "isCameraAppInForeground: starting detection");
 
-        List<ActivityManager.RunningAppProcessInfo> procs = am.getRunningAppProcesses();
-        if (procs == null) return false;
+        // --- Tier 1: LogcatWatcher foreground package tracking ---
+        String logcatPkg = LogcatWatcher.getForegroundPackage();
+        Log.d(TAG, "isCameraAppInForeground [T1-logcat]: lastForegroundPkg=" + logcatPkg);
+        if (logcatPkg != null) {
+            boolean match = isCameraPackage(logcatPkg);
+            Log.d(TAG, "isCameraAppInForeground [T1-logcat]: isCameraPackage=" + match
+                    + " pkg=" + logcatPkg);
+            if (match) return true;
+            // Non-camera package seen via logcat - still fall through to T2/T3
+            // because the logcat line may be slightly stale (last app BEFORE camera).
+        } else {
+            Log.d(TAG, "isCameraAppInForeground [T1-logcat]: no foreground pkg seen yet"
+                    + " (no ActivityManager lines captured - camera opened before service started?)");
+        }
 
-        for (ActivityManager.RunningAppProcessInfo proc : procs) {
-            if (proc.importance != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
-                continue;
-            }
-            if (proc.pkgList == null) continue;
-            for (String pkg : proc.pkgList) {
-                if (KNOWN_CAMERA_PACKAGES.contains(pkg)) {
-                    Log.d(TAG, "isCameraAppInForeground: matched known pkg=" + pkg);
-                    return true;
+        // --- Tier 2: UsageStatsManager (10-second window) ---
+        try {
+            UsageStatsManager usm = (UsageStatsManager)
+                    context.getSystemService(Context.USAGE_STATS_SERVICE);
+            if (usm != null) {
+                long now   = System.currentTimeMillis();
+                long begin = now - 10_000; // 10-second window
+                Map<String, UsageStats> statsMap = usm.queryAndAggregateUsageStats(begin, now);
+                Log.d(TAG, "isCameraAppInForeground [T2-usage]: statsMap size=" + statsMap.size());
+                if (!statsMap.isEmpty()) {
+                    // Find the package with the most recent lastTimeUsed
+                    String topPkg = null;
+                    long topTime  = 0;
+                    for (Map.Entry<String, UsageStats> e : statsMap.entrySet()) {
+                        long t = e.getValue().getLastTimeUsed();
+                        Log.d(TAG, "isCameraAppInForeground [T2-usage]: pkg=" + e.getKey()
+                                + " lastUsed=" + t);
+                        if (t > topTime) { topTime = t; topPkg = e.getKey(); }
+                    }
+                    Log.d(TAG, "isCameraAppInForeground [T2-usage]: topPkg=" + topPkg
+                            + " topTime=" + topTime + " now=" + now);
+                    if (topPkg != null) {
+                        boolean match = isCameraPackage(topPkg);
+                        Log.d(TAG, "isCameraAppInForeground [T2-usage]: isCameraPackage=" + match);
+                        if (match) return true;
+                    }
+                } else {
+                    Log.d(TAG, "isCameraAppInForeground [T2-usage]: empty result"
+                            + " (PACKAGE_USAGE_STATS not granted? grant via:"
+                            + " adb shell appops set com.pluskeymap.app GET_USAGE_STATS allow)");
                 }
-                // Catch-all for OEM forks and regional variants
-                if (pkg != null && pkg.toLowerCase().contains("camera")) {
-                    Log.d(TAG, "isCameraAppInForeground: matched substring pkg=" + pkg);
-                    return true;
+            } else {
+                Log.w(TAG, "isCameraAppInForeground [T2-usage]: UsageStatsManager unavailable");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "isCameraAppInForeground [T2-usage]: exception: " + e.getMessage());
+        }
+
+        // --- Tier 3: ActivityManager.getRunningAppProcesses() (legacy / OEM) ---
+        try {
+            ActivityManager am = (ActivityManager)
+                    context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                List<ActivityManager.RunningAppProcessInfo> procs = am.getRunningAppProcesses();
+                Log.d(TAG, "isCameraAppInForeground [T3-procs]: procCount="
+                        + (procs != null ? procs.size() : "null"));
+                if (procs != null) {
+                    for (ActivityManager.RunningAppProcessInfo proc : procs) {
+                        Log.d(TAG, "isCameraAppInForeground [T3-procs]: proc="
+                                + proc.processName + " importance=" + proc.importance
+                                + " pkgList=" + (proc.pkgList != null
+                                        ? java.util.Arrays.toString(proc.pkgList) : "null"));
+                        if (proc.importance
+                                != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                            continue;
+                        }
+                        if (proc.pkgList == null) continue;
+                        for (String pkg : proc.pkgList) {
+                            if (isCameraPackage(pkg)) {
+                                Log.d(TAG, "isCameraAppInForeground [T3-procs]: matched pkg=" + pkg);
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
+        } catch (Exception e) {
+            Log.w(TAG, "isCameraAppInForeground [T3-procs]: exception: " + e.getMessage());
+        }
+
+        Log.d(TAG, "isCameraAppInForeground: all tiers exhausted - no camera app detected");
+        return false;
+    }
+
+    /**
+     * Returns true if the given package name belongs to a known camera app or
+     * contains "camera" as a substring (catch-all for OEM forks and variants).
+     */
+    private boolean isCameraPackage(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return false;
+        if (KNOWN_CAMERA_PACKAGES.contains(pkg)) {
+            Log.d(TAG, "isCameraPackage: known list match: " + pkg);
+            return true;
+        }
+        if (pkg.toLowerCase().contains("camera")) {
+            Log.d(TAG, "isCameraPackage: substring match: " + pkg);
+            return true;
         }
         return false;
     }

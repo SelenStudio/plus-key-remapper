@@ -15,6 +15,11 @@ import java.nio.charset.StandardCharsets;
  * Always uses broad filter. Watchdog detects actual process death rather than
  * silence — OxygenOS throttles logcat output in ~32s bursts so silence alone
  * is NOT an indicator of a kill.
+ *
+ * Also tracks the foreground package by parsing ActivityManager "Displayed"
+ * and "START" lines from logcat. This is the only reliable zero-permission
+ * method to identify the foreground app on Android 10+ (getRunningAppProcesses
+ * only returns the caller's own process since Android 10).
  */
 public class LogcatWatcher implements Runnable {
 
@@ -29,6 +34,19 @@ public class LogcatWatcher implements Runnable {
     private static final long   WATCHDOG_INTERVAL_MS   = 2_000;
 
     public static final int PLUS_KEY_CODE = 9999;
+
+    /**
+     * Last foreground package seen in ActivityManager logcat lines.
+     * Updated whenever the OS logs "Displayed pkg/Activity" or
+     * "START u0 {... pkg=...}" lines, which happen on every activity launch.
+     * Volatile so ActionExecutor can read it from a different thread safely.
+     */
+    private static volatile String sForegroundPackage = null;
+
+    /** Returns the last known foreground package, or null if not yet seen. */
+    public static String getForegroundPackage() {
+        return sForegroundPackage;
+    }
 
     private static final String[] TAG_PATTERNS = {
         "KEYLOG_OplusKeyEventUtil",
@@ -178,6 +196,10 @@ public class LogcatWatcher implements Runnable {
                     Log.d(TAG, "Logcat access confirmed -- waiting for OEM key tag to verify system dialog");
                     mainHandler.post(() -> service.onLogcatVerifying());
                 }
+                // Track foreground package from ActivityManager lines.
+                // Parsed BEFORE the OEM key check so it works from the first logcat line.
+                parseForegroundPackage(line);
+
                 if (matchesTagPattern(line) && matchesMsgPattern(line)) {
                     if (!oemKeyConfirmed) {
                         oemKeyConfirmed = true;
@@ -213,6 +235,61 @@ public class LogcatWatcher implements Runnable {
     private boolean matchesMsgPattern(String line) {
         for (String p : MSG_PATTERNS) { if (line.contains(p)) return true; }
         return false;
+    }
+
+    /**
+     * Parses ActivityManager logcat lines to track the current foreground package.
+     *
+     * Two reliable patterns emitted on every activity launch:
+     *
+     *   ActivityManager: Displayed com.oneplus.camera/.CameraActivity: +342ms
+     *   ActivityManager: START u0 {act=... pkg=com.oneplus.camera} ...
+     *
+     * Both are present in standard AOSP and OxygenOS. We update sForegroundPackage
+     * on each match so ActionExecutor can query it without any system permission.
+     */
+    private void parseForegroundPackage(String line) {
+        // Only process ActivityManager lines for efficiency
+        if (!line.contains("ActivityManager") && !line.contains("ActivityTaskManager")) return;
+
+        // Pattern 1: "Displayed pkg/Activity" or "Displayed pkg/.Activity"
+        // Example: I/ActivityManager: Displayed com.oneplus.camera/.CameraActivity: +342ms
+        int dispIdx = line.indexOf("Displayed ");
+        if (dispIdx >= 0) {
+            String rest = line.substring(dispIdx + "Displayed ".length()).trim();
+            // rest starts with "pkg/Activity" or "pkg/.Activity"
+            int slashIdx = rest.indexOf('/');
+            if (slashIdx > 0) {
+                String pkg = rest.substring(0, slashIdx);
+                if (pkg.contains(".") && !pkg.contains(" ")) {
+                    if (!pkg.equals(sForegroundPackage)) {
+                        Log.d(TAG, "parseForegroundPackage [Displayed]: " + pkg);
+                        sForegroundPackage = pkg;
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Pattern 2: "START u0 {... pkg=com.example.app}" or "cmp=com.example.app/.Activity"
+        // Example: ActivityManager: START u0 {act=android.intent.action.MAIN ... pkg=com.oneplus.camera} ...
+        int pkgIdx = line.indexOf("pkg=");
+        if (pkgIdx >= 0) {
+            String rest = line.substring(pkgIdx + 4);
+            // Trim at first whitespace, '}', or end-of-string
+            int end = rest.length();
+            for (int i = 0; i < rest.length(); i++) {
+                char c = rest.charAt(i);
+                if (c == ' ' || c == '}' || c == '\t' || c == '\n') { end = i; break; }
+            }
+            String pkg = rest.substring(0, end).trim();
+            if (pkg.contains(".") && !pkg.isEmpty() && !pkg.contains(" ")) {
+                if (!pkg.equals(sForegroundPackage)) {
+                    Log.d(TAG, "parseForegroundPackage [pkg=]: " + pkg);
+                    sForegroundPackage = pkg;
+                }
+            }
+        }
     }
 
     private void handleKeyLine() {

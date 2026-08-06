@@ -26,12 +26,12 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Grant READ_LOGS once via ADB and you\'re done forever."
+            android:text="Grant READ_LOGS once and you\'re done forever."
             android:textAppearance="@style/TextAppearance.Material3.BodyLarge"
             android:textColor="?attr/colorOnSurfaceVariant"
             android:layout_marginBottom="28dp" />
 
-        <!-- ── Step 1 — Disable system Plus Key action ── -->
+        <!-- Step 1 - Disable system Plus Key action -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -80,12 +80,12 @@
                     android:layout_height="wrap_content"
                     android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                     android:textColor="?attr/colorOnSurfaceVariant"
-                    android:text="Open your phone's Settings app → Gestures &amp; motions → Plus Key → set the action to &quot;No action&quot;. This prevents OxygenOS from consuming the key before this app can see it." />
+                    android:text="Open Settings → Gestures &amp; motions → Plus Key → set the action to \"No action\". This stops OxygenOS from consuming the key before this app can see it." />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ── Step 2 — Developer Options ── -->
+        <!-- Step 2 - Install and set up Shizuku -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -125,7 +125,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Enable Developer Options"
+                        android:text="Set up Shizuku"
                         android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
                 </LinearLayout>
 
@@ -134,20 +134,53 @@
                     android:layout_height="wrap_content"
                     android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                     android:textColor="?attr/colorOnSurfaceVariant"
-                    android:text="Settings → About Device → Version → Version Number → tap it repeatedly until developer options are enabled."
+                    android:text="Shizuku is a free app that lets Plus Key Remapper grant itself the needed permission without a PC. You only run one ADB command once to activate Shizuku, then it handles everything."
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:text="Setup: Install Shizuku → open it → tap \'Pairing\' → use Wireless Debugging (no PC cable needed on Android 11+) → start the Shizuku service."
                     android:layout_marginBottom="14dp" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnOpenDevOptions"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="wrap_content"
+                <!-- Shizuku not installed -->
+                <LinearLayout
+                    android:id="@+id/shizukuNotInstalledSection"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Open Developer Options" />
+                    android:orientation="vertical"
+                    android:visibility="visible">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnShizukuInstall"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Install Shizuku from Play Store" />
+
+                </LinearLayout>
+
+                <!-- Shizuku installed -->
+                <LinearLayout
+                    android:id="@+id/shizukuGrantSection"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnShizukuGrant"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Grant via Shizuku" />
+
+                </LinearLayout>
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ── Step 3 — Disable permission monitoring ── -->
+        <!-- Step 3 - Manual ADB fallback -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -187,7 +220,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Disable Permission Monitoring"
+                        android:text="Alternative - Manual ADB"
                         android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
                 </LinearLayout>
 
@@ -196,61 +229,7 @@
                     android:layout_height="wrap_content"
                     android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                     android:textColor="?attr/colorOnSurfaceVariant"
-                    android:text="In Developer Options, scroll down and enable &quot;Disable permission monitoring&quot;. This allows the ADB command to work." />
-
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- ── Step 4 — ADB command ── -->
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="10dp"
-            app:cardCornerRadius="16dp"
-            app:cardElevation="0dp"
-            app:strokeWidth="1dp"
-            app:strokeColor="?attr/colorOutlineVariant">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="20dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="8dp">
-
-                    <FrameLayout
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:background="@drawable/bg_icon_circle_sm"
-                        android:layout_marginEnd="10dp">
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_gravity="center"
-                            android:text="4"
-                            android:textAppearance="@style/TextAppearance.Material3.LabelMedium"
-                            android:textColor="?attr/colorOnPrimaryContainer" />
-                    </FrameLayout>
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Run ADB Command on PC"
-                        android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
-                    android:textColor="?attr/colorOnSurfaceVariant"
-                    android:text="Connect your phone via USB. Run this once, you\'ll never need to again:"
+                    android:text="If you prefer not to use Shizuku, enable Developer Options, connect via USB to a PC and run this once:"
                     android:layout_marginBottom="12dp" />
 
                 <!-- Command box -->
@@ -275,14 +254,24 @@
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnCopyCommand"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="Copy Command" />
 
+                <!-- Developer options button -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnOpenDevOptions"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Open Developer Options" />
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ── Why is this needed ── -->
+        <!-- Why is this needed -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -311,7 +300,7 @@
                     android:textAppearance="@style/TextAppearance.Material3.BodySmall"
                     android:textColor="?attr/colorOnSurfaceVariant"
                     android:lineSpacingMultiplier="1.4"
-                    android:text="READ_LOGS: OxygenOS intercepts the Plus Key before any app can see it. The only rootless way to detect it is by reading the system log, which requires this one-time permission grant.\n\nSYSTEM_ALERT_WINDOW: This lets the app keep working while you use other apps, so your Plus Key mappings work everywhere on your phone, not just on the home screen.\n\nBoth grants are safe and do not affect other apps." />
+                    android:text="READ_LOGS: OxygenOS intercepts the Plus Key before any app can see it. The only rootless way to detect it is by reading the system log, which requires this one-time permission grant.\n\nSYSTEM_ALERT_WINDOW: Lets the app keep working while you use other apps so your Plus Key mappings work everywhere on your phone.\n\nBoth grants are safe and do not affect other apps." />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

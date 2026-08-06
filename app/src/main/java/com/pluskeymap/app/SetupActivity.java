@@ -20,22 +20,39 @@ import androidx.core.view.WindowCompat;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.snackbar.Snackbar;
 
+import rikka.shizuku.Shizuku;
+
 public class SetupActivity extends AppCompatActivity {
 
     public static final String PREFS_SETUP = "pkm_setup";
     public static final String KEY_SKIPPED = "setup_skipped";
 
+    // Fallback manual ADB command (no PC required if using wireless ADB)
     private static final String ADB_COMMAND =
             "adb shell \"pm grant com.pluskeymap.app android.permission.READ_LOGS && appops set com.pluskeymap.app SYSTEM_ALERT_WINDOW allow\"";
 
-    private TextView tvPermStatus;
+    private TextView      tvPermStatus;
+    private MaterialButton btnShizukuGrant;
+    private MaterialButton btnShizukuInstall;
+    private View          shizukuGrantSection;
+    private View          shizukuNotInstalledSection;
 
     private final Handler  handler           = new Handler(Looper.getMainLooper());
     private boolean        alreadyProceeding = false;
 
+    // Shizuku permission result listener
+    private final Shizuku.OnRequestPermissionResultListener shizukuPermListener =
+            (requestCode, grantResult) -> {
+                if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                    runShizukuGrant();
+                } else {
+                    showStatus("Shizuku permission denied. Use the manual ADB command below.", false);
+                }
+            };
+
     private final Runnable permissionPoller = new Runnable() {
         @Override public void run() {
-            updatePermissionStatus();
+            updateUi();
             handler.postDelayed(this, 1_500);
         }
     };
@@ -51,12 +68,16 @@ public class SetupActivity extends AppCompatActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         setContentView(R.layout.activity_setup);
 
-        tvPermStatus = findViewById(R.id.tvPermStatus);
+        tvPermStatus             = findViewById(R.id.tvPermStatus);
+        btnShizukuGrant          = findViewById(R.id.btnShizukuGrant);
+        btnShizukuInstall        = findViewById(R.id.btnShizukuInstall);
+        shizukuGrantSection      = findViewById(R.id.shizukuGrantSection);
+        shizukuNotInstalledSection = findViewById(R.id.shizukuNotInstalledSection);
 
-        TextView tvCommand = findViewById(R.id.tvAdbCommand);
-        tvCommand.setText(ADB_COMMAND);
+        // Register Shizuku permission callback
+        Shizuku.addRequestPermissionResultListener(shizukuPermListener);
 
-        // Step 2 — Developer Options
+        // Developer options button
         MaterialButton btnDevOptions = findViewById(R.id.btnOpenDevOptions);
         btnDevOptions.setOnClickListener(v -> {
             try {
@@ -68,7 +89,33 @@ public class SetupActivity extends AppCompatActivity {
             }
         });
 
-        // Copy ADB command + arm restart alarm
+        // Shizuku grant button
+        btnShizukuGrant.setOnClickListener(v -> {
+            if (!ShizukuHelper.isShizukuRunning()) {
+                Snackbar.make(findViewById(android.R.id.content),
+                        "Shizuku is not running. Open Shizuku and start the service first.",
+                        Snackbar.LENGTH_LONG).show();
+                return;
+            }
+            if (ShizukuHelper.hasShizukuPermission()) {
+                runShizukuGrant();
+            } else {
+                ShizukuHelper.requestPermission();
+            }
+        });
+
+        // Shizuku install button — opens Play Store
+        btnShizukuInstall.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("market://details?id=moe.shizuku.privileged.api")));
+            } catch (Exception e) {
+                startActivity(new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api")));
+            }
+        });
+
+        // Copy ADB command (manual fallback)
         MaterialButton btnCopy = findViewById(R.id.btnCopyCommand);
         btnCopy.setOnClickListener(v -> {
             ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
@@ -77,7 +124,10 @@ public class SetupActivity extends AppCompatActivity {
             btnCopy.postDelayed(() -> btnCopy.setText("Copy Command"), 2_000);
         });
 
-        // Skip — go to MainActivity in degraded mode
+        TextView tvCommand = findViewById(R.id.tvAdbCommand);
+        tvCommand.setText(ADB_COMMAND);
+
+        // Skip
         MaterialButton btnSkip = findViewById(R.id.btnSkip);
         btnSkip.setOnClickListener(v -> {
             getSharedPreferences(PREFS_SETUP, MODE_PRIVATE)
@@ -86,7 +136,6 @@ public class SetupActivity extends AppCompatActivity {
             overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out);
             finish();
         });
-
     }
 
     @Override
@@ -95,7 +144,7 @@ public class SetupActivity extends AppCompatActivity {
         if (!isPermissionGranted()) {
             RestartReceiver.schedule(this);
         }
-        updatePermissionStatus();
+        updateUi();
         handler.postDelayed(permissionPoller, 1_500);
     }
 
@@ -105,16 +154,31 @@ public class SetupActivity extends AppCompatActivity {
         handler.removeCallbacks(permissionPoller);
     }
 
-    private void updatePermissionStatus() {
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Shizuku.removeRequestPermissionResultListener(shizukuPermListener);
+    }
+
+    private void updateUi() {
         boolean logGranted     = isLogPermissionGranted();
         boolean overlayGranted = isOverlayPermissionGranted();
         boolean allGranted     = logGranted && overlayGranted;
 
-        if (allGranted) {
-            tvPermStatus.setText("✓ All permissions granted. Restarting…");
-            tvPermStatus.setTextColor(getColor(android.R.color.holo_green_dark));
-            tvPermStatus.setVisibility(View.VISIBLE);
+        // Show/hide Shizuku sections based on install state
+        boolean shizukuInstalled = ShizukuHelper.isShizukuInstalled(this);
+        shizukuGrantSection.setVisibility(shizukuInstalled ? View.VISIBLE : View.GONE);
+        shizukuNotInstalledSection.setVisibility(shizukuInstalled ? View.GONE : View.VISIBLE);
 
+        // Update grant button label based on Shizuku running state
+        if (shizukuInstalled) {
+            boolean running = ShizukuHelper.isShizukuRunning();
+            btnShizukuGrant.setEnabled(running);
+            btnShizukuGrant.setText(running ? "Grant via Shizuku" : "Open Shizuku first");
+        }
+
+        if (allGranted) {
+            showStatus("All permissions granted. Starting...", true);
             if (!alreadyProceeding) {
                 alreadyProceeding = true;
                 handler.removeCallbacks(permissionPoller);
@@ -125,10 +189,37 @@ public class SetupActivity extends AppCompatActivity {
             StringBuilder sb = new StringBuilder();
             sb.append(logGranted     ? "✓ READ_LOGS granted\n" : "✗ READ_LOGS not granted\n");
             sb.append(overlayGranted ? "✓ SYSTEM_ALERT_WINDOW granted" : "✗ SYSTEM_ALERT_WINDOW not granted");
-            tvPermStatus.setText(sb.toString().trim());
-            tvPermStatus.setTextColor(getColor(android.R.color.holo_red_dark));
-            tvPermStatus.setVisibility(View.VISIBLE);
+            showStatus(sb.toString().trim(), false);
         }
+    }
+
+    private void runShizukuGrant() {
+        btnShizukuGrant.setEnabled(false);
+        btnShizukuGrant.setText("Granting...");
+        showStatus("Granting permissions via Shizuku...", true);
+
+        ShizukuHelper.grantReadLogs(this, handler, new ShizukuHelper.Callback() {
+            @Override
+            public void onGrantSuccess() {
+                showStatus("Granted! Starting...", true);
+                handler.postDelayed(() -> updateUi(), 600);
+            }
+
+            @Override
+            public void onGrantFailure(String reason) {
+                btnShizukuGrant.setEnabled(true);
+                btnShizukuGrant.setText("Grant via Shizuku");
+                showStatus("Grant failed: " + reason + "\nTry the manual ADB command below.", false);
+            }
+        });
+    }
+
+    private void showStatus(String msg, boolean success) {
+        tvPermStatus.setText(msg);
+        tvPermStatus.setTextColor(success
+                ? getColor(android.R.color.holo_green_dark)
+                : getColor(android.R.color.holo_red_dark));
+        tvPermStatus.setVisibility(View.VISIBLE);
     }
 
     private boolean isPermissionGranted() {
@@ -155,29 +246,12 @@ public class SetupActivity extends AppCompatActivity {
         finish();
     }
 
-    /**
-     * FIX: Attempts to open OxygenOS/ColorOS "App Launch" control for this app.
-     * User must set it to "Manual" and enable all 3 toggles:
-     *   - Auto-launch
-     *   - Secondary launch (allows other apps to start this one)
-     *   - Run in background
-     *
-     * Without this, OxygenOS kills child processes (the logcat subprocess) and
-     * eventually the service itself, regardless of WakeLock and foreground status.
-    /**
-     * Opens OxygenOS App Launch settings for this app (or falls back to App Info).
-     * Can be called from anywhere — e.g. from a settings card in SettingsActivity.
-     */
     public static void openOxygenOsAppLaunchSettings(android.content.Context ctx) {
-        // OxygenOS 11-14 (OnePlus) — primary path
         String[] candidates = {
             "com.oneplus.security/com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity",
-            // ColorOS (OPPO/Realme) variant
             "com.coloros.safecenter/com.coloros.safecenter.permission.startup.StartupAppListActivity",
-            // OxygenOS 15 / OOS 14 with security center repackaged
             "com.oplus.safecenter/com.oplus.safecenter.permission.startup.StartupAppListActivity",
         };
-
         for (String candidate : candidates) {
             String[] parts = candidate.split("/");
             try {
@@ -185,20 +259,14 @@ public class SetupActivity extends AppCompatActivity {
                 i.setComponent(new ComponentName(parts[0], parts[1]));
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 ctx.startActivity(i);
-                return; // success
+                return;
             } catch (Exception ignored) {}
         }
-
-        // Fallback: standard App Info page (works on all Android)
         try {
             Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                     .setData(Uri.parse("package:" + ctx.getPackageName()))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             ctx.startActivity(fallback);
         } catch (Exception ignored) {}
-    }
-
-    private void openOxygenOsAppLaunch() {
-        openOxygenOsAppLaunchSettings(this);
     }
 }

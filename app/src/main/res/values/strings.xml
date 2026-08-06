@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Plus Key Remapper</string>
+    <string name="service_description">Listens for the OnePlus 15 Plus Key and executes your custom actions.</string>
+</resources>

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Seed colour for Material You dynamic palette -->
+    <color name="seed">#1B6EF3</color>
+</resources>

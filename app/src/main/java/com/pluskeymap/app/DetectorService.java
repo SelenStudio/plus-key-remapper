@@ -603,13 +603,6 @@ public class DetectorService extends Service {
                 .getBoolean(KEY_LOGCAT_DENIED, false);
     }
 
-    /** @deprecated Use {@link #isLogcatDenied(android.content.Context)} instead. */
-    static boolean isLogcatDenied() {
-        if (instance == null) return false;
-        return instance.getSharedPreferences(PREFS_LOGCAT, MODE_PRIVATE)
-                .getBoolean(KEY_LOGCAT_DENIED, false);
-    }
-
     static boolean isLogcatVerifying() { return logcatVerifying; }
 
     /**

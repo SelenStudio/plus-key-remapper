@@ -147,7 +147,7 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- ── Step 3 — Disable permission monitoring ── -->
+        <!-- ── Step 3 — Disable system optimisation ── -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -187,7 +187,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Disable Permission Monitoring"
+                        android:text="Disable System Optimisation"
                         android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
                 </LinearLayout>
 
@@ -196,7 +196,7 @@
                     android:layout_height="wrap_content"
                     android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                     android:textColor="?attr/colorOnSurfaceVariant"
-                    android:text="In Developer Options, scroll down and enable &quot;Disable permission monitoring&quot;. This allows the ADB command to work." />
+                    android:text="In Developer Options, scroll down and enable &quot;Disable system optimisation&quot;. This allows the ADB command to work." />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

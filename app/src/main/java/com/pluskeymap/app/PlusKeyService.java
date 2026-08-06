@@ -109,6 +109,27 @@ public class PlusKeyService extends AccessibilityService {
     }
 
     /**
+     * System packages that fire TYPE_WINDOW_STATE_CHANGED constantly as overlays
+     * or infrastructure layers, but are never the user-visible foreground app.
+     *
+     * Critically: com.android.systemui fires on EVERY screen interaction —
+     * status bar updates, toasts, volume panel, etc. — making it dominate the
+     * TYPE_WINDOW_STATE_CHANGED stream.  If we let it through, sForegroundPackage
+     * gets overwritten to "systemui" every few seconds, which makes T1's timestamp
+     * appear 5+ seconds old at the next key press, causing it to fall through to
+     * T2-UsageStats (which still sees the camera as "most recently used").
+     */
+    private static final Set<String> SYSTEM_OVERLAY_PACKAGES = new HashSet<>(Arrays.asList(
+            "com.android.systemui",
+            "android",
+            "com.android.inputmethod.latin",
+            "com.google.android.inputmethod.latin",
+            "com.sohu.inputmethod.sogou",
+            "com.baidu.input",
+            "com.iflytek.inputmethod"
+    ));
+
+    /**
      * Tracks the foreground package via AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED.
      *
      * This fires instantly when any app comes to the foreground — including when the
@@ -124,20 +145,50 @@ public class PlusKeyService extends AccessibilityService {
      * We write directly into LogcatWatcher.sForegroundPackage via the public setter
      * so that ActionExecutor.isCameraAppInForeground() Tier-1 sees the correct value
      * without any architectural changes to the detection pipeline.
+     *
+     * Filtering strategy: only accept events from TYPE_APPLICATION windows and skip
+     * known system overlay packages (systemui chief among them).  systemui fires
+     * TYPE_WINDOW_STATE_CHANGED on every status-bar update, toast, volume panel etc.
+     * — if we let those through they overwrite the real foreground package every few
+     * seconds, making T1's timestamp always appear stale and causing unnecessary
+     * fallthrough to T2-UsageStats.
      */
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             CharSequence pkgCs = event.getPackageName();
-            if (pkgCs != null) {
-                String pkg = pkgCs.toString();
-                // Skip our own app and system IME / overlay processes that fire
-                // TYPE_WINDOW_STATE_CHANGED constantly without being "foreground" in
-                // the user-visible sense.
-                if (!pkg.isEmpty() && !pkg.equals(getPackageName())) {
-                    LogcatWatcher.setForegroundPackage(pkg);
+            if (pkgCs == null) return;
+            String pkg = pkgCs.toString();
+            if (pkg.isEmpty()) return;
+
+            // Skip our own app.
+            if (pkg.equals(getPackageName())) return;
+
+            // Skip system overlays that are never the real user-visible foreground.
+            if (SYSTEM_OVERLAY_PACKAGES.contains(pkg)) return;
+
+            // Only accept events whose source window is a real application window,
+            // not a system overlay, input method, or accessibility overlay.
+            // getSource() returns the node that generated the event; its window type
+            // tells us whether this is a full-screen app or just a system layer.
+            AccessibilityNodeInfo source = event.getSource();
+            if (source != null) {
+                AccessibilityWindowInfo window = source.getWindow();
+                if (window != null) {
+                    int windowType = window.getType();
+                    window.recycle();
+                    // Only TYPE_APPLICATION (1) and TYPE_SPLIT_SCREEN_DIVIDER (5) represent
+                    // real user-launched app windows.  TYPE_SYSTEM (3) covers systemui,
+                    // input methods, and overlays — those we skip.
+                    if (windowType != AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        source.recycle();
+                        return;
+                    }
                 }
+                source.recycle();
             }
+
+            LogcatWatcher.setForegroundPackage(pkg);
         }
     }
 

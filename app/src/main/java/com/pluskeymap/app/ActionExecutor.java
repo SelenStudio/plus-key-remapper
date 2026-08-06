@@ -385,11 +385,18 @@ public class ActionExecutor {
      * seconds after it was backgrounded, which is exactly what caused the ~30 s
      * shutter-override hang reported in the field.
      *
-     * The window is intentionally short (4 s) so that if the foreground watcher
-     * somehow missed the very first logcat line (service cold-start race), we
-     * still fall through to T2 rather than giving a spurious false-negative.
+     * Raised from 4 s → 10 s because:
+     *   • com.android.systemui is now filtered from setForegroundPackage() in
+     *     PlusKeyService.onAccessibilityEvent(), so the timestamp only updates
+     *     when a real application window takes focus — much less frequently.
+     *   • A 10 s window covers realistic gaps between a11y events (e.g. the
+     *     user leaves camera, the launcher takes focus, then presses the key 8 s
+     *     later) without risking false-negatives at service cold-start.
+     *   • If T1 is genuinely stale (> 10 s) we still fall through to T2, and
+     *     T2's freshness guard prevents the camera from being re-instated unless
+     *     it was actually opened in the last T2_CAMERA_FRESHNESS_MS.
      */
-    private static final long T1_AUTHORITATIVE_NON_CAMERA_AGE_MS = 4_000;
+    private static final long T1_AUTHORITATIVE_NON_CAMERA_AGE_MS = 10_000;
 
     /**
      * Maximum delta between "camera app last used" and now that we still count

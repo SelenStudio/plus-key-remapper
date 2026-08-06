@@ -241,26 +241,24 @@ public class LogcatWatcher implements Runnable {
      * Parses logcat lines to track the current foreground package.
      *
      * OxygenOS 15 does NOT emit standard ActivityManager "Displayed" or
-     * "START pkg=" lines to third-party logcat readers for all app launches.
-     * Instead we scan ALL incoming lines for four patterns:
+     * "START pkg=" lines to third-party logcat readers. Instead, camera
+     * launches appear under AIUnit/SurfaceControl tags with these patterns:
      *
-     *   1. "Displayed pkg/Activity"   (AOSP ActivityManager standard)
-     *   2. "cmp=pkg/.Activity"        (OxygenOS ActivityTaskManager format)
-     *   3. "pkg=com.example.app"      (intent dump in START lines)
-     *   4. Any line containing a known camera package name substring
-     *      ("camera", "oplus.camera", "oneplus.camera") — catch-all for OEM
+     *   1. "Displayed pkg/Activity"          — AOSP ActivityManager standard
+     *   2. "cmp=pkg/.Activity"               — OxygenOS ActivityTaskManager
+     *   3. "pkg=com.example.app"             — START intent dump
+     *   4. "callPackageName=com.oplus.camera" — AIUnit-PluginUnit (OxygenOS)
+     *   5. "SurfaceView[com.oplus.camera/…]" — SurfaceControl (OxygenOS)
      *
-     * We also log every line that contains "camera" (case-insensitive) at DEBUG
-     * level so we can see exactly what OxygenOS emits when the camera opens.
-     * This logging can be removed once the correct pattern is identified.
+     * IMPORTANT: We must skip lines that originate from our own process (TAG
+     * prefix = "PKM_") to prevent a logcat self-feedback loop where our DIAG
+     * log lines are read back and re-logged infinitely, burning OxygenOS's
+     * per-process 300-line quota and causing LOG_FLOWCTRL DROPPED.
      */
     private void parseForegroundPackage(String line) {
-        // DIAGNOSTIC: log any line that mentions camera so we can see what
-        // OxygenOS actually emits when the camera app is launched.
-        if (line.toLowerCase().contains("camera") || line.contains("oplus.camera")
-                || line.contains("oneplus.camera") || line.contains("com.oplus")) {
-            Log.d(TAG, "DIAG camera-line: " + line);
-        }
+        // Skip our own log output to prevent self-referencing feedback loops.
+        // OxygenOS logcat format: "D/PKM_Logcat: ..." — the tag always starts PKM_.
+        if (line.contains("PKM_")) return;
 
         // Pattern 1: "Displayed pkg/Activity" — AOSP standard, any tag
         int dispIdx = line.indexOf("Displayed ");
@@ -277,7 +275,6 @@ public class LogcatWatcher implements Runnable {
         }
 
         // Pattern 2: "cmp=pkg/.Activity" — OxygenOS ActivityTaskManager format
-        // Example: cmp=com.oplus.camera/.CameraActivity
         int cmpIdx = line.indexOf("cmp=");
         if (cmpIdx >= 0) {
             String rest = line.substring(cmpIdx + 4);
@@ -306,6 +303,43 @@ public class LogcatWatcher implements Runnable {
             String pkg = rest.substring(0, end).trim();
             if (isValidPackageName(pkg)) {
                 updateForegroundPackage(pkg, "pkg=");
+                return;
+            }
+        }
+
+        // Pattern 4: "callPackageName=com.oplus.camera" — AIUnit-PluginUnit (OxygenOS 15)
+        // Seen in logs: AIUnit-PluginUnit: callPackageName=com.oplus.camera
+        int callPkgIdx = line.indexOf("callPackageName=");
+        if (callPkgIdx >= 0) {
+            String rest = line.substring(callPkgIdx + "callPackageName=".length());
+            int end = rest.length();
+            for (int i = 0; i < rest.length(); i++) {
+                char c = rest.charAt(i);
+                if (c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '}') {
+                    end = i;
+                    break;
+                }
+            }
+            String pkg = rest.substring(0, end).trim();
+            if (isValidPackageName(pkg)) {
+                updateForegroundPackage(pkg, "callPackageName=");
+                return;
+            }
+        }
+
+        // Pattern 5: "SurfaceView[com.oplus.camera/com.oplus.camera.Camera]"
+        // Seen in SurfaceControl logs when camera surface is created/focused.
+        int svIdx = line.indexOf("SurfaceView[");
+        if (svIdx >= 0) {
+            String rest = line.substring(svIdx + "SurfaceView[".length());
+            int slashIdx = rest.indexOf('/');
+            int closeIdx = rest.indexOf(']');
+            if (slashIdx > 0 && (closeIdx < 0 || slashIdx < closeIdx)) {
+                String pkg = rest.substring(0, slashIdx);
+                if (isValidPackageName(pkg)) {
+                    updateForegroundPackage(pkg, "SurfaceView");
+                    return;
+                }
             }
         }
     }

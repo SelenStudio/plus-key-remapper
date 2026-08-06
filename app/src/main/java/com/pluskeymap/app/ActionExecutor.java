@@ -15,7 +15,6 @@ import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
-import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -551,89 +550,51 @@ public class ActionExecutor {
     /**
      * Triggers the shutter in the foreground OxygenOS camera.
      *
-     * All soft dispatch paths (AudioManager media key, ACTION_CAMERA_BUTTON
-     * broadcast, ACTION_IMAGE_CAPTURE) have been confirmed non-functional on
-     * OxygenOS 15. The root cause: AudioManager.dispatchMediaKeyEvent() routes
-     * to the MediaSession of the audio focus holder, but OxygenOS camera does
-     * not hold audio focus — it intercepts hardware key events directly from
-     * the input dispatcher, which requires window focus that we don't have.
+     * Root cause of all previous failures: injectInputEvent() called from a
+     * ForegroundService process throws SecurityException regardless of declared
+     * permissions, because the caller does not hold the signature-level
+     * INJECT_EVENTS grant. AudioManager and broadcast paths are confirmed dead
+     * on OxygenOS 15.
      *
-     * Strategy cascade (each tried independently, all logged):
+     * The fix: delegate injection to PlusKeyService (the AccessibilityService).
+     * Android grants injectInputEvent() to AccessibilityService processes without
+     * requiring INJECT_EVENTS — the same mechanism TalkBack and Switch Access use
+     * to inject key events. The call enters the input dispatcher via the same
+     * path as a physical volume key press, so OxygenOS camera receives it.
      *
-     *   S1 — InputManager.injectInputEvent(KEYCODE_VOLUME_DOWN):
-     *        The SecurityException we saw earlier was for KEYCODE_CAMERA.
-     *        OxygenOS may allow VOLUME_DOWN injection since volume keys go
-     *        through a different permission path (MODIFY_AUDIO_SETTINGS which
-     *        we already hold). OxygenOS camera maps volume-down to shutter.
+     * S1 — PlusKeyService.injectVolumeDown():
+     *      Inject KEYCODE_VOLUME_DOWN from the a11y service process. OxygenOS
+     *      camera maps volume-down to shutter when in the viewfinder.
+     *      Requires the user to enable the service in Settings > Accessibility.
+     *      Logs a clear actionable message when the service is not connected.
      *
-     *   S2 — AudioManager.adjustStreamVolume(STREAM_RING, ADJUST_LOWER):
-     *        Some OEM camera apps listen for AudioManager volume change events
-     *        rather than raw key events. This is a permission-free path.
-     *
-     *   S3 — AudioManager.dispatchMediaKeyEvent(KEYCODE_VOLUME_DOWN):
-     *        Kept from previous iteration; confirmed no-op but zero cost.
+     * S2 — AudioManager.adjustStreamVolume() dead-end fallback:
+     *      Confirmed no-op on OxygenOS 15. Kept as a harmless last-resort in
+     *      case some future OEM fork observes volume-change callbacks.
      */
     private void dispatchCameraButton() {
-        // S1: injectInputEvent(KEYCODE_VOLUME_DOWN) via InputManager reflection.
-        // VOLUME_DOWN uses the MODIFY_AUDIO_SETTINGS permission path, not
-        // INJECT_EVENTS, so OxygenOS may allow it where KEYCODE_CAMERA was blocked.
-        try {
-            Object im = context.getSystemService(Context.INPUT_SERVICE);
-            if (im != null) {
-                java.lang.reflect.Method inject = im.getClass().getMethod(
-                        "injectInputEvent", android.view.InputEvent.class, int.class);
-                inject.setAccessible(true);
-                long t = SystemClock.uptimeMillis();
-                KeyEvent down = new KeyEvent(t, t, KeyEvent.ACTION_DOWN,
-                        KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0, -1, 0,
-                        KeyEvent.FLAG_FROM_SYSTEM, android.view.InputDevice.SOURCE_KEYBOARD);
-                KeyEvent up = new KeyEvent(t, SystemClock.uptimeMillis(),
-                        KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN, 0, 0, -1, 0,
-                        KeyEvent.FLAG_FROM_SYSTEM, android.view.InputDevice.SOURCE_KEYBOARD);
-                boolean downOk = (Boolean) inject.invoke(im, down, 0);
-                boolean upOk   = (Boolean) inject.invoke(im, up,   0);
-                Log.d(TAG, "dispatchCameraButton [S1]: injectInputEvent VOLUME_DOWN"
-                        + " down=" + downOk + " up=" + upOk);
-            }
-        } catch (Exception e) {
-            Throwable cause = (e instanceof java.lang.reflect.InvocationTargetException)
-                    ? e.getCause() : e;
-            Log.w(TAG, "dispatchCameraButton [S1]: failed ("
-                    + (cause != null ? cause.getClass().getSimpleName() : e.getClass().getSimpleName())
-                    + "): " + (cause != null ? cause.getMessage() : e.getMessage()));
+        // S1: Inject KEYCODE_VOLUME_DOWN via the AccessibilityService process.
+        // AccessibilityService.injectInputEvent() bypasses the INJECT_EVENTS gate.
+        PlusKeyService a11y = PlusKeyService.instance;
+        if (a11y != null) {
+            boolean ok = a11y.injectVolumeDown();
+            Log.d(TAG, "dispatchCameraButton [S1-a11y]: injectVolumeDown=" + ok);
+            if (ok) return;
+        } else {
+            Log.w(TAG, "dispatchCameraButton [S1-a11y]: AccessibilityService not connected."
+                    + " Enable \"Plus Key Remapper\" in Settings > Accessibility.");
         }
 
-        // S2: AudioManager.adjustStreamVolume — some OEM cameras listen for
-        // volume change callbacks rather than raw key events.
+        // S2: Dead-end fallback — confirmed ineffective on OxygenOS 15.
         try {
             AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
             if (am != null) {
-                // Use ADJUST_SAME to ping without actually changing volume.
-                // If that doesn't work, ADJUST_LOWER then ADJUST_RAISE to restore.
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                        AudioManager.ADJUST_LOWER, 0 /* no UI */);
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
-                        AudioManager.ADJUST_RAISE, 0);
-                Log.d(TAG, "dispatchCameraButton [S2]: adjustStreamVolume LOWER+RAISE sent");
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, 0);
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, 0);
+                Log.d(TAG, "dispatchCameraButton [S2-fallback]: adjustStreamVolume LOWER+RAISE sent");
             }
         } catch (Exception e) {
-            Log.w(TAG, "dispatchCameraButton [S2]: failed: " + e.getMessage());
-        }
-
-        // S3: AudioManager.dispatchMediaKeyEvent(KEYCODE_VOLUME_DOWN) — confirmed
-        // no-op on OxygenOS 15, kept for completeness.
-        try {
-            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                long t = SystemClock.uptimeMillis();
-                am.dispatchMediaKeyEvent(new KeyEvent(t, t,
-                        KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN, 0));
-                am.dispatchMediaKeyEvent(new KeyEvent(t, SystemClock.uptimeMillis(),
-                        KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN, 0));
-                Log.d(TAG, "dispatchCameraButton [S3]: dispatchMediaKeyEvent VOLUME_DOWN sent");
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "dispatchCameraButton [S3]: failed: " + e.getMessage());
+            Log.w(TAG, "dispatchCameraButton [S2-fallback]: " + e.getMessage());
         }
     }
 

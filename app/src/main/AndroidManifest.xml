@@ -53,6 +53,21 @@
             android:windowSoftInputMode="adjustResize"
             />
 
+        <!-- Accessibility service — provides camera shutter injection (injectInputEvent
+             works from an a11y process without INJECT_EVENTS permission) and screenshot. -->
+        <service
+            android:name=".PlusKeyService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <!-- Logcat detector — stays alive with WakeLock, works screen-off -->
         <service
             android:name=".DetectorService"

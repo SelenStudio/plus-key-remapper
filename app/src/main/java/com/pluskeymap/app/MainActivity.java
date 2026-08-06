@@ -47,7 +47,7 @@ public class MainActivity extends AppCompatActivity {
     // Set when OEM logcat dialog is denied mid-session. Cleared when user retries.
     private boolean oemLogcatDenied = false;
 
-    // Polls permission state while activity is visible — catches OEM "allow read
+    // Polls permission state while activity is visible - catches OEM "allow read
     // logs" system overlays that do NOT trigger onPause/onResume, and detects
     // when the OEM dialog is accepted (logcatEverConfirmed flips to true).
     private final android.os.Handler permPoller =
@@ -58,7 +58,7 @@ public class MainActivity extends AppCompatActivity {
                 stopDetectorService();
                 applySkippedState(false);
             }
-            // Refresh status on every tick — catches logcatConfirmed flipping to true
+            // Refresh status on every tick - catches logcatConfirmed flipping to true
             // mid-session (dialog accepted while UI is open) without needing a broadcast.
             refreshServiceStatus(false);
             permPoller.postDelayed(this, 1_500);
@@ -142,7 +142,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (savedInstanceState == null) runEntranceAnimation();
 
-        // Launched from the "permission revoked" notification — auto-start service
+        // Launched from the "permission revoked" notification - auto-start service
         // so OxygenOS shows its READ_LOGS consent dialog immediately.
         if (getIntent() != null && getIntent().getBooleanExtra("reauth_logperm", false)) {
             handleReauthIntent();
@@ -161,16 +161,16 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Called when the user taps the "permission revoked" notification.
      * Starts DetectorService so OxygenOS shows the READ_LOGS consent dialog.
-     * isPermissionGranted() will return false here — we skip that guard
+     * isPermissionGranted() will return false here - we skip that guard
      * intentionally because starting the service is what triggers the dialog.
      */
     private void handleReauthIntent() {
         boolean wasRunning = getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
                 .getBoolean(SettingsActivity.KEY_SERVICE_WAS_RUNNING, false);
-        if (!wasRunning) return; // user had stopped it — don't auto-restart
+        if (!wasRunning) return; // user had stopped it - don't auto-restart
         // Dismiss the notification now that user has responded
         KeepaliveJobService.dismissPermNotification(this);
-        // Start service — this triggers the OEM READ_LOGS consent dialog on OxygenOS
+        // Start service - this triggers the OEM READ_LOGS consent dialog on OxygenOS
         oemLogcatDenied = false;
         serviceRunning = true;
         launchDetectorService();
@@ -255,7 +255,7 @@ public class MainActivity extends AppCompatActivity {
             boolean oemDeniedPersist = DetectorService.isLogcatDenied(this);
 
             if (permGranted && (oemLogcatDenied || oemDeniedPersist || !oemEverConfirmed)) {
-                // ADB perm is fine — we just need the OEM system dialog to appear.
+                // ADB perm is fine - we just need the OEM system dialog to appear.
                 // Starting DetectorService is what triggers the dialog. Clear all
                 // denial state first so the service gets a clean attempt.
                 oemLogcatDenied = false;
@@ -328,7 +328,7 @@ public class MainActivity extends AppCompatActivity {
      *   • Toggle ON + a11y NOT granted → card background tinted red,
      *       warning row visible; tapping the card body opens Accessibility Settings.
      *
-     * The preference is saved immediately on toggle — no dialog. When the card
+     * The preference is saved immediately on toggle - no dialog. When the card
      * is in the warning state, tapping anywhere on it opens Accessibility Settings
      * rather than re-toggling. The switch still works normally for on/off.
      */
@@ -461,7 +461,7 @@ public class MainActivity extends AppCompatActivity {
     /**
      * Shows the setup banner only when ADB permission is missing or setup was
      * explicitly skipped. All other states (OEM dialog, verifying, denied) are
-     * handled inline by the status card — no need to block the whole UI.
+     * handled inline by the status card - no need to block the whole UI.
      */
     private void applySkippedState(boolean oemDenied) {
         boolean skipped     = wasSetupSkipped();
@@ -503,7 +503,7 @@ public class MainActivity extends AppCompatActivity {
      *
      * When DISABLING we also clear the clickable flag so disabled children
      * cannot swallow touch events.  When RE-ENABLING we only restore
-     * setEnabled — we deliberately do NOT call setClickable(true) on every
+     * setEnabled - we deliberately do NOT call setClickable(true) on every
      * descendant, because views that were never meant to be clickable (e.g.
      * TextViews and icons inside a card) would start intercepting touches and
      * prevent the parent MaterialCardView's OnClickListener from firing.
@@ -565,7 +565,7 @@ public class MainActivity extends AppCompatActivity {
         int targetColor;
 
         if (!logPerm) {
-            // No ADB permission — setup not done.
+            // No ADB permission - setup not done.
             tvStatusTitle.setText("Setup required");
             tvStatusSub.setText("Tap to open setup and grant the required permissions.");
             ivStatusIcon.setImageResource(R.drawable.ic_status_warning);
@@ -577,7 +577,7 @@ public class MainActivity extends AppCompatActivity {
             ivStatusIcon.setImageResource(R.drawable.ic_status_active);
             targetColor = resolveColor(com.google.android.material.R.attr.colorPrimaryContainer);
         } else if (serviceRunning) {
-            // Service is up but hasn't seen an OEM key tag yet — could be starting,
+            // Service is up but hasn't seen an OEM key tag yet - could be starting,
             // waiting for the system dialog, or waiting for the user to press the key.
             tvStatusTitle.setText("Press the Plus Key once");
             tvStatusSub.setText("Press it once to finish setup.");
@@ -754,7 +754,7 @@ public class MainActivity extends AppCompatActivity {
         List<String>  displayLabels = new ArrayList<>();
         List<Integer> actionIndices = new ArrayList<>();
         for (int i = 0; i < ActionConfig.ACTION_LABELS.length; i++) {
-            // Skip Custom Intent — handled by the new tabbed picker below
+            // Skip Custom Intent - handled by the new tabbed picker below
             if (ActionConfig.ACTION_LABELS[i] != null
                     && i != ActionConfig.ACTION_CUSTOM_INTENT) {
                 displayLabels.add(ActionConfig.ACTION_LABELS[i]);

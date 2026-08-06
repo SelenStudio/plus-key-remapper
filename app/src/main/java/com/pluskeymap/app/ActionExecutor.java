@@ -547,38 +547,86 @@ public class ActionExecutor {
         }
     }
 
+    /**
+     * Triggers the shutter in the foreground camera app using a cascade of
+     * strategies, each logged individually so we can see which one works.
+     *
+     * OxygenOS 15 camera ignores ACTION_CAMERA_BUTTON broadcasts (it does not
+     * register a receiver for them). The strategies in order:
+     *
+     *   S1 — KEYCODE_VOLUME_DOWN via AudioManager:
+     *        OxygenOS camera intercepts volume keys as shutter when it has
+     *        foreground focus. AudioManager dispatches volume key events to
+     *        the active audio session which the camera app registers.
+     *        This is how third-party camera apps (Open Camera, etc.) work.
+     *
+     *   S2 — ACTION_CAMERA_BUTTON ordered broadcast (kept as fallback):
+     *        Standard AOSP path. OxygenOS camera may ignore it but it costs
+     *        nothing to try after S1.
+     *
+     *   S3 — MediaStore.ACTION_IMAGE_CAPTURE with FLAG_ACTIVITY_SINGLE_TOP:
+     *        On some OEM builds this routes the capture request to the already-
+     *        open camera instance instead of launching a new one.
+     */
     private void dispatchCameraButton() {
-        long downTime = SystemClock.uptimeMillis();
-        KeyEvent down = new KeyEvent(downTime, downTime,
-                KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_CAMERA, 0,
-                0, -1, 0, KeyEvent.FLAG_FROM_SYSTEM);
-        KeyEvent up = new KeyEvent(downTime, SystemClock.uptimeMillis(),
-                KeyEvent.ACTION_UP, KeyEvent.KEYCODE_CAMERA, 0,
-                0, -1, 0, KeyEvent.FLAG_FROM_SYSTEM);
+        String camPkg = LogcatWatcher.getForegroundPackage();
 
-        // Send ACTION_CAMERA_BUTTON as ordered broadcast to the camera package.
-        // This matches the exact intent Android dispatches from physical camera buttons.
+        // S1: KEYCODE_VOLUME_DOWN — OxygenOS camera's actual shutter key.
+        // AudioManager routes volume events to the foreground audio focus holder,
+        // which is the camera app. No special permission required.
         try {
-            String camPkg = LogcatWatcher.getForegroundPackage();
+            AudioManager am = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                long t = SystemClock.uptimeMillis();
+                am.dispatchMediaKeyEvent(new KeyEvent(t, t,
+                        KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_VOLUME_DOWN, 0));
+                am.dispatchMediaKeyEvent(new KeyEvent(t, SystemClock.uptimeMillis(),
+                        KeyEvent.ACTION_UP, KeyEvent.KEYCODE_VOLUME_DOWN, 0));
+                Log.d(TAG, "dispatchCameraButton [S1]: KEYCODE_VOLUME_DOWN dispatched via AudioManager");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "dispatchCameraButton [S1]: failed: " + e.getMessage());
+        }
 
-            Intent downIntent = new Intent(Intent.ACTION_CAMERA_BUTTON);
-            downIntent.putExtra(Intent.EXTRA_KEY_EVENT, down);
-            downIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            if (camPkg != null) downIntent.setPackage(camPkg);
-            context.sendOrderedBroadcast(downIntent, null);
+        // S2: ACTION_CAMERA_BUTTON ordered broadcast (AOSP standard path).
+        try {
+            long t = SystemClock.uptimeMillis();
+            KeyEvent down = new KeyEvent(t, t, KeyEvent.ACTION_DOWN,
+                    KeyEvent.KEYCODE_CAMERA, 0, 0, -1, 0, KeyEvent.FLAG_FROM_SYSTEM);
+            KeyEvent up   = new KeyEvent(t, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP,
+                    KeyEvent.KEYCODE_CAMERA, 0, 0, -1, 0, KeyEvent.FLAG_FROM_SYSTEM);
 
-            Intent upIntent = new Intent(Intent.ACTION_CAMERA_BUTTON);
-            upIntent.putExtra(Intent.EXTRA_KEY_EVENT, up);
-            upIntent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            if (camPkg != null) upIntent.setPackage(camPkg);
-            context.sendOrderedBroadcast(upIntent, null);
+            Intent di = new Intent(Intent.ACTION_CAMERA_BUTTON);
+            di.putExtra(Intent.EXTRA_KEY_EVENT, down);
+            di.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            if (camPkg != null) di.setPackage(camPkg);
+            context.sendOrderedBroadcast(di, null);
 
-            Log.d(TAG, "dispatchCameraButton: ACTION_CAMERA_BUTTON sent to "
+            Intent ui = new Intent(Intent.ACTION_CAMERA_BUTTON);
+            ui.putExtra(Intent.EXTRA_KEY_EVENT, up);
+            ui.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            if (camPkg != null) ui.setPackage(camPkg);
+            context.sendOrderedBroadcast(ui, null);
+
+            Log.d(TAG, "dispatchCameraButton [S2]: ACTION_CAMERA_BUTTON sent to "
                     + (camPkg != null ? camPkg : "broadcast"));
         } catch (Exception e) {
-            Log.w(TAG, "dispatchCameraButton: failed (" + e.getClass().getSimpleName()
-                    + "): " + e.getMessage() + " — falling back to AudioManager");
-            dispatchMediaKey(KeyEvent.KEYCODE_CAMERA);
+            Log.w(TAG, "dispatchCameraButton [S2]: failed: " + e.getMessage());
+        }
+
+        // S3: MediaStore.ACTION_IMAGE_CAPTURE with SINGLE_TOP — routes to existing
+        // camera instance on some OEM builds without opening a new one.
+        try {
+            Intent capture = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+            capture.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            if (camPkg != null) capture.setPackage(camPkg);
+            context.startActivity(capture);
+            Log.d(TAG, "dispatchCameraButton [S3]: ACTION_IMAGE_CAPTURE sent to "
+                    + (camPkg != null ? camPkg : "system"));
+        } catch (Exception e) {
+            Log.w(TAG, "dispatchCameraButton [S3]: failed: " + e.getMessage());
         }
     }
 

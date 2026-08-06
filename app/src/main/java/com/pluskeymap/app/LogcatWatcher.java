@@ -64,6 +64,26 @@ public class LogcatWatcher implements Runnable {
         return ts == 0 ? Long.MAX_VALUE : System.currentTimeMillis() - ts;
     }
 
+    /**
+     * Externally sets the foreground package from a higher-fidelity source.
+     *
+     * Called by PlusKeyService (the AccessibilityService) whenever it receives
+     * a TYPE_WINDOW_STATE_CHANGED event, which fires instantly when any app
+     * comes to the foreground — including when the camera is dismissed via Back
+     * or Home. This is the authoritative signal that replaces logcat tracking
+     * for the exit-detection case: the logcat parser reliably sees camera *launch*
+     * (via cmp=/SurfaceView lines) but does NOT see camera *exit*, because the
+     * launcher/home screen does not emit those logcat lines when it resumes.
+     *
+     * Thread-safe: both fields are volatile.
+     */
+    public static void setForegroundPackage(String pkg) {
+        if (pkg == null || pkg.equals(sForegroundPackage)) return;
+        Log.d(TAG, "setForegroundPackage [a11y]: " + pkg);
+        sForegroundPackage = pkg;
+        sForegroundPackageTimestamp = System.currentTimeMillis();
+    }
+
     private static final String[] TAG_PATTERNS = {
         "KEYLOG_OplusKeyEventUtil",
         "OplusKeyEventUtil",

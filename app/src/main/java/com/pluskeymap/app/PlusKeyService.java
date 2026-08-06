@@ -108,8 +108,38 @@ public class PlusKeyService extends AccessibilityService {
         Log.d(TAG, "onServiceConnected: a11y service ready — shutter via node click");
     }
 
+    /**
+     * Tracks the foreground package via AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED.
+     *
+     * This fires instantly when any app comes to the foreground — including when the
+     * user presses Back or Home to leave the camera. It is guaranteed to fire before
+     * the user can press the Plus Key again, making it a perfect zero-latency source
+     * of truth for "what app is in the foreground right now".
+     *
+     * This completely supersedes the logcat-based foreground tracking for the purpose
+     * of camera detection: the logcat parser sees the camera launch (via cmp= lines)
+     * but does NOT reliably see the camera exit, because the launcher/home screen
+     * does not emit cmp=/pkg= logcat lines when it resumes. The a11y event always fires.
+     *
+     * We write directly into LogcatWatcher.sForegroundPackage via the public setter
+     * so that ActionExecutor.isCameraAppInForeground() Tier-1 sees the correct value
+     * without any architectural changes to the detection pipeline.
+     */
     @Override
-    public void onAccessibilityEvent(AccessibilityEvent event) {}
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            CharSequence pkgCs = event.getPackageName();
+            if (pkgCs != null) {
+                String pkg = pkgCs.toString();
+                // Skip our own app and system IME / overlay processes that fire
+                // TYPE_WINDOW_STATE_CHANGED constantly without being "foreground" in
+                // the user-visible sense.
+                if (!pkg.isEmpty() && !pkg.equals(getPackageName())) {
+                    LogcatWatcher.setForegroundPackage(pkg);
+                }
+            }
+        }
+    }
 
     @Override
     public void onInterrupt() {}

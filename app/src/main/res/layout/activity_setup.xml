@@ -80,7 +80,7 @@
                     android:layout_height="wrap_content"
                     android:textAppearance="@style/TextAppearance.Material3.BodyMedium"
                     android:textColor="?attr/colorOnSurfaceVariant"
-                    android:text="Open Settings → Gestures &amp; motions → Plus Key → set the action to \"No action\". This stops OxygenOS from consuming the key before this app can see it." />
+                    android:text="Open Settings → Gestures &amp; motions → Plus Key → set the action to &quot;No action&quot;. This stops OxygenOS from consuming the key before this app can see it." />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

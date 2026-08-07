@@ -81,6 +81,13 @@ public class DetectorService extends Service {
     private static final long SINGLE_CONFIRM_FAST_MS = 80;
     private static final long SINGLE_COMMIT_MS      = 700;
     private static final long POST_SINGLE_GUARD_MS  = 900;
+    /**
+     * How long to wait after a "noise UP" (UP before SINGLE_CONFIRM_MS) before
+     * concluding that the user genuinely released the key with a fast tap.
+     * If a new DOWN arrives within this window the UP was hardware bounce and we
+     * keep the long-press cycle alive; if no DOWN arrives we fire the single action.
+     */
+    private static final long NOISE_UP_CONFIRM_MS   = 200;
     private long    lastDownTime   = 0;
     private boolean longPressArmed = false;
     private boolean longPressFired  = false;
@@ -91,6 +98,8 @@ public class DetectorService extends Service {
     private Runnable singleCommitRunnable;
     private Runnable longPressRunnable;
     private Runnable resetRunnable;
+    /** Posted after a fast UP (< SINGLE_CONFIRM_MS) to confirm genuine fast tap. */
+    private Runnable noiseUpRunnable;
     private Handler  handler;
 
     // ── Service lifecycle ───────────────────────────────────────────────────
@@ -195,6 +204,23 @@ public class DetectorService extends Service {
                 // that once the cycle is fully complete the next DOWN is always accepted
                 // immediately, regardless of when the OS-delayed UP eventually arrives.
                 lastUpTime = 0;
+            };
+
+            // noiseUpRunnable: posted after a fast UP (< SINGLE_CONFIRM_MS) in dual mode.
+            // If no new DOWN has arrived by the time this fires, the user genuinely tapped
+            // fast and we should dispatch the single action.  If a new DOWN arrives first
+            // (hardware bounce), the DOWN handler cancels this runnable so we stay armed
+            // for a long press instead.
+            noiseUpRunnable = () -> {
+                logd("noiseUpRunnable fired — no bounce DOWN, genuine fast tap → dispatch single");
+                handler.removeCallbacks(longPressRunnable);
+                longPressArmed = false;
+                singleFired    = false;
+                lastActionTime = System.currentTimeMillis();
+                dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
+                        ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
+                        ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
+                handler.postDelayed(resetRunnable, 400);
             };
         }
         prefs = ActionExecutor.prefs(this);
@@ -316,6 +342,16 @@ public class DetectorService extends Service {
 
             lastDownTime = now;
 
+            // A DOWN while noiseUpRunnable is pending means hardware bounce after a fast
+            // release.  Cancel the "genuine fast tap" timeout and keep the long-press
+            // cycle armed — the longPressRunnable is still counting down.
+            if (handler.hasCallbacks(noiseUpRunnable)) {
+                logd("DOWN during noise-UP window — hardware bounce, cancelling noiseUpRunnable, staying armed");
+                handler.removeCallbacks(noiseUpRunnable);
+                // longPressArmed stays true; longPressRunnable is still running.
+                return;
+            }
+
             int saved = prefs.getInt(ActionExecutor.KEY_DETECTED_KEYCODE, ActionExecutor.KEYCODE_UNSET);
             if (saved == ActionExecutor.KEYCODE_UNSET) {
                 prefs.edit().putInt(ActionExecutor.KEY_DETECTED_KEYCODE, LogcatWatcher.PLUS_KEY_CODE).apply();
@@ -405,16 +441,29 @@ public class DetectorService extends Service {
             }
 
             if (!singleFired && heldMs < SINGLE_CONFIRM_MS) {
-                // Released before the confirm timer fired.
-                // In dual mode: keep longPressRunnable armed so a genuine long press can
-                // still be detected.  Only cancel the singleRunnable (it hasn't fired yet
-                // and we don't want a spurious tap to be dispatched).
-                // longPressArmed stays TRUE — do NOT disarm here.
-                logd("UP before confirm (" + heldMs + "ms) — noise, ignoring (keeping long-press armed)");
+                // UP arrived before the confirm timer fired (fast tap < SINGLE_CONFIRM_MS).
+                //
+                // We cannot tell yet whether this is:
+                //  (a) a genuine fast tap — the user released the key and hardware bounce
+                //      produced a spurious second DOWN/UP pair shortly after, OR
+                //  (b) an early UP from a logging gap mid-long-press — the user is still
+                //      holding the key and the watcher briefly lost the stream.
+                //
+                // Strategy: cancel singleRunnable (it hasn't fired yet), keep
+                // longPressRunnable alive (still counting toward LONG_PRESS_MS), and post
+                // noiseUpRunnable after NOISE_UP_CONFIRM_MS.
+                //
+                // • If a bounce DOWN arrives within NOISE_UP_CONFIRM_MS → the DOWN handler
+                //   cancels noiseUpRunnable and we stay armed for long press (case b / bounce).
+                // • If no DOWN arrives → noiseUpRunnable fires, confirms genuine fast tap,
+                //   cancels longPressRunnable and dispatches single (case a).
+                logd("UP before confirm (" + heldMs + "ms) — posting noiseUpRunnable (" + NOISE_UP_CONFIRM_MS + "ms) to disambiguate tap vs bounce");
                 singleFired    = false;
                 longPressFired = false;
                 handler.removeCallbacks(singleRunnable);
                 handler.removeCallbacks(resetRunnable);
+                handler.removeCallbacks(noiseUpRunnable); // clear any stale one
+                handler.postDelayed(noiseUpRunnable, NOISE_UP_CONFIRM_MS);
                 // DO NOT cancel longPressRunnable, DO NOT set longPressArmed = false.
                 return;
             }
@@ -616,6 +665,7 @@ public class DetectorService extends Service {
             handler.removeCallbacks(singleRunnable);
             handler.removeCallbacks(singleCommitRunnable);
             handler.removeCallbacks(resetRunnable);
+            handler.removeCallbacks(noiseUpRunnable);
         }
         longPressArmed = false;
         longPressFired = false;

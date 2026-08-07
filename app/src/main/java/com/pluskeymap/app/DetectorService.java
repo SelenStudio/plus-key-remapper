@@ -76,22 +76,26 @@ public class DetectorService extends Service {
     private long lastUpTime    = 0;
     private long lastActionTime = 0;
     private static final long ACTION_DEBOUNCE_MS    = 700;
-    // Must be strictly greater than LogcatWatcher.RELEASE_PAUSE_DUAL_MS (600 ms).
+    // Must be strictly greater than the worst-case synthetic UP delivery time for a tap.
     //
-    // LogcatWatcher now anchors the synthetic UP timer to the first DOWN logcat line
-    // (downTime), so it is delivered exactly RELEASE_PAUSE_DUAL_MS (600 ms) after
-    // the first key line regardless of how many OEM repeat lines the hardware emits.
-    // This makes UP delivery deterministic: UP always arrives at downTime + 600 ms.
+    // Architecture (LogcatWatcher + DetectorService co-design):
     //
-    // LONG_PRESS_MS must still exceed RELEASE_PAUSE_DUAL_MS so that for a genuine
-    // fast tap the UP (at +600 ms) always beats longPressRunnable (at +700 ms):
-    //   Fast tap → UP at +600 ms → cancel longPressRunnable → dispatch single ✓
-    //   Real long press → key held ≥ 700 ms → longPressRunnable fires first ✓
+    // OEM hardware (OnePlus/OPPO) emits ~1 logcat repeat line per ~180 ms while the
+    // key is held.  LogcatWatcher reschedules the synthetic UP on every such line —
+    // but ONLY while elapsed < LONG_PRESS_MS_CAP (= this value, 850 ms).  Once the
+    // cap is exceeded, rescheduling stops and the UP fires ~600 ms later.
     //
-    // Previously the UP was re-scheduled on every OEM repeat line, so even a tap
-    // could produce an UP at +784 ms (last repeat at +184 ms + 600 ms), causing
-    // longPressRunnable to fire at +700 ms first — a false long press.
-    private static final long LONG_PRESS_MS         = 700;
+    // For a TAP: the user physically releases quickly; the OEM typically emits a last
+    // repeat line at ~184 ms.  Since 184 ms < 850 ms cap, the UP IS rescheduled to
+    // 184 + 600 = 784 ms.  LONG_PRESS_MS = 850 ms > 784 ms, so the UP always arrives
+    // first → correct single-tap dispatch.
+    //
+    // For a LONG PRESS: lines keep arriving every ~180 ms past the 850 ms cap.  The
+    // last rescheduled UP fires ~600 ms after the cap kicks in (~1450 ms total) — well
+    // after longPressRunnable fires at 850 ms → correct long-press dispatch.
+    //
+    // INVARIANT: LONG_PRESS_MS must equal LogcatWatcher.LONG_PRESS_MS_CAP.  Keep in sync.
+    private static final long LONG_PRESS_MS         = 850;
     private static final long SINGLE_CONFIRM_MS     = 150;
     private static final long SINGLE_CONFIRM_FAST_MS = 80;
     private static final long SINGLE_COMMIT_MS      = 700;
@@ -321,17 +325,20 @@ public class DetectorService extends Service {
     //   DOWN → arm singleRunnable (80 ms noise guard) → fires → dispatch single
     //
     // Dual mode (single + long press):
-    //   DOWN → arm singleRunnable (150 ms) AND longPressRunnable (700 ms)
+    //   DOWN → arm singleRunnable (150 ms) AND longPressRunnable (850 ms)
     //
-    //   CRITICAL: LONG_PRESS_MS (700 ms) MUST be > LogcatWatcher.RELEASE_PAUSE_DUAL_MS (600 ms).
-    //   LogcatWatcher anchors the synthetic UP to the first DOWN logcat line (downTime), so
-    //   UP is always delivered at downTime + 600 ms — deterministic regardless of OEM repeat
-    //   lines.  (Previously UP was re-scheduled on every repeat line, so OEM hardware emitting
-    //   a second line at +184 ms would push UP to +784 ms, causing a false long press at +700 ms.)
+    //   CRITICAL INVARIANT: LONG_PRESS_MS (850 ms) must equal LogcatWatcher.LONG_PRESS_MS_CAP.
     //
-    //   If longPressRunnable fires first (key held ≥ 700 ms) → cancel singleRunnable → dispatch long
-    //   If UP arrives before longPressRunnable fires AND singleRunnable already fired
-    //       → cancel longPressRunnable → dispatch single
+    //   LogcatWatcher reschedules the synthetic UP on every OEM repeat line, but only
+    //   while elapsed < LONG_PRESS_MS_CAP (850 ms).  After the cap, rescheduling stops
+    //   so the UP fires naturally ~600 ms later.
+    //
+    //   TAP path:  last OEM repeat line at ~184 ms → UP rescheduled → arrives at ~784 ms.
+    //              LONG_PRESS_MS=850 ms > 784 ms → UP beats longPressRunnable → single ✓
+    //
+    //   LONG PRESS: OEM lines past 850 ms are no longer rescheduling UP. longPressRunnable
+    //              fires at 850 ms first → long press ✓  UP arrives ~1450 ms (ignored).
+    //
     //   If UP arrives before singleRunnable fires (fast tap < 150 ms)
     //       → post noiseUpRunnable(200 ms): if no bounce DOWN → dispatch single; else stay armed
 
@@ -409,7 +416,7 @@ public class DetectorService extends Service {
                     handler.postDelayed(longPressRunnable, LONG_PRESS_MS);
                     logd("DOWN (dual) — confirm=" + SINGLE_CONFIRM_MS + "ms"
                             + ", longPress=" + LONG_PRESS_MS + "ms"
-                            + " (> watcher pause 600ms) timers armed");
+                            + " (cap=" + LogcatWatcher.LONG_PRESS_MS_CAP + "ms) timers armed");
                 }
             } else {
                 // Already armed — this is a repeated logcat line while key is held.

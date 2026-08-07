@@ -31,6 +31,36 @@ public class LogcatWatcher implements Runnable {
     // before longPressRunnable has a chance to trigger.
     private static final long   RELEASE_PAUSE_SINGLE_MS = 50;
     private static final long   RELEASE_PAUSE_DUAL_MS   = 600;
+    /**
+     * Once the elapsed time since the first DOWN logcat line exceeds this value,
+     * the watcher stops rescheduling the synthetic UP on further OEM repeat lines.
+     *
+     * Why this matters (the tap vs long-press race):
+     *
+     * OEM hardware (OnePlus/OPPO) emits one logcat repeat line every ~180 ms while
+     * the key is physically held.  Each line used to reschedule the UP runnable by
+     * another RELEASE_PAUSE_DUAL_MS (600 ms), pushing it indefinitely into the future
+     * as long as the key was held.  That was correct for long presses but caused a
+     * false long-press for taps: a tap's last repeat line at ~184 ms delivered UP at
+     * ~784 ms — after LONG_PRESS_MS (700 ms) already fired.
+     *
+     * Fix strategy — cap rescheduling at LONG_PRESS_MS_CAP:
+     *
+     *  • For TAPS  (physical hold ≪ 700 ms): the OEM emits 1-2 lines before the
+     *    user releases.  The last line arrives at ~184 ms.  184 ms < 700 ms cap, so
+     *    the UP IS rescheduled to 184 + 600 = 784 ms.  Meanwhile LONG_PRESS_MS in
+     *    DetectorService is set to 850 ms (> 784 ms), so the UP always beats the
+     *    long-press timer → correct single-tap dispatch.
+     *
+     *  • For LONG PRESSES (physical hold ≥ 850 ms): lines keep arriving every ~180 ms.
+     *    At ~700 ms elapsed the cap kicks in: no more rescheduling.  The last UP posted
+     *    before the cap fires RELEASE_PAUSE_DUAL_MS (600 ms) later — i.e. somewhere
+     *    around 700 + 600 = 1300 ms — well after the long-press action at 850 ms.
+     *    The longPressRunnable fires at 850 ms first → correct long-press dispatch.
+     *
+     * Must be set to LONG_PRESS_MS in DetectorService (850 ms).  Keep in sync.
+     */
+    static final long LONG_PRESS_MS_CAP = 850;
     // Max wait for first line before declaring permission denied.
     private static final long   FIRST_LINE_TIMEOUT_MS  = 20_000;
     // Max wait for an OEM key tag line after generic logcat access is confirmed.
@@ -553,15 +583,26 @@ public class LogcatWatcher implements Runnable {
             service.handleLogcatKey("down");
         } else {
             // Key is already down — OEM hardware is emitting a repeat line while
-            // the user holds the key.  Update lastEventTime for debounce purposes
-            // but do NOT reschedule the UP runnable.  The UP timer was posted at
-            // DOWN time anchored to downTime; rescheduling it here would push the
-            // synthetic UP further into the future on every repeat line and cause
-            // a false long-press for genuine fast taps (see downTime field doc).
+            // the user holds the key.  Update lastEventTime for debounce and
+            // reschedule the UP runnable ONLY if we are still within the long-press
+            // window.  Once the long-press threshold has elapsed the longPressRunnable
+            // in DetectorService has already fired, so there is no longer any race
+            // between the synthetic UP and the long-press timer — we can safely stop
+            // rescheduling and let the UP arrive.
+            //
+            // Cap: if the elapsed time since downTime already exceeds LONG_PRESS_MS,
+            // do NOT reschedule — let the already-posted UP runnable fire naturally.
+            // This prevents the UP from being deferred indefinitely on very long holds.
             lastEventTime = now;
-            return;
+            long elapsed = now - downTime;
+            if (elapsed >= LONG_PRESS_MS_CAP) {
+                // Long-press threshold already passed — don't push UP further out.
+                return;
+            }
         }
-        // Only reached on the first (DOWN) line of a press cycle.
+        // Post (or re-post) the UP runnable.  For new presses this is the first post;
+        // for repeat lines within the long-press window this reschedules it so the UP
+        // only arrives after the OEM stops emitting lines (i.e. user genuinely releases).
         if (upRunnable != null) mainHandler.removeCallbacks(upRunnable);
         upRunnable = () -> {
             isDown   = false;

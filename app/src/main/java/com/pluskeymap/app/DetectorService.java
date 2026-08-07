@@ -187,6 +187,14 @@ public class DetectorService extends Service {
                 singlePending  = false;
                 longPressArmed = false;
                 longPressFired = false;
+                // In single-only mode the OS delivers a real UP event long after the
+                // action already fired (the watcher waits 50 ms of silence, but the
+                // hardware can hold the key for 700+ ms).  That late UP sets lastUpTime,
+                // and subsequent DOWNs within 150 ms are then blocked as noise even
+                // though they are genuine new presses.  Clearing lastUpTime here means
+                // that once the cycle is fully complete the next DOWN is always accepted
+                // immediately, regardless of when the OS-delayed UP eventually arrives.
+                lastUpTime = 0;
             };
         }
         prefs = ActionExecutor.prefs(this);
@@ -288,7 +296,12 @@ public class DetectorService extends Service {
             long downToDownGap = now - lastDownTime;
 
             // Ignore rapid DOWN events immediately after an UP (hardware bounce / noise).
-            if (lastUpTime > 0 && upToDownGap < 150) {
+            // 100 ms is enough to reject genuine sub-frame bounce (~5 ms) while
+            // allowing a fast re-press at 148 ms that was previously blocked by the
+            // old 150 ms threshold.  Dual mode uses SINGLE_CONFIRM_MS (150 ms) as
+            // its own noise guard via the singleRunnable timer, so this guard only
+            // needs to block the very fast hardware bounce, not full confirm windows.
+            if (lastUpTime > 0 && upToDownGap < 100) {
                 logd("Noise DOWN ignored (upGap=" + upToDownGap + "ms)");
                 return;
             }

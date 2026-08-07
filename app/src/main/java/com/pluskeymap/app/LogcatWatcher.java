@@ -141,6 +141,27 @@ public class LogcatWatcher implements Runnable {
     private volatile boolean oemKeyConfirmed   = false;
 
     private long             lastEventTime = 0;
+    /**
+     * Wall-clock time of the first logcat key line for the current press (i.e. the
+     * moment isDown flipped to true).  Used to anchor the UP-release timer so that
+     * repeated OEM logcat lines emitted while the key is held do NOT push the UP
+     * delivery further into the future.
+     *
+     * Background: OEM hardware (e.g. OnePlus/OPPO) emits one logcat line per key
+     * repeat while the key is physically held.  The old code reset lastEventTime on
+     * every such line, which meant the synthetic UP was always delivered
+     * (RELEASE_PAUSE_DUAL_MS=600 ms) after the *last* logcat line — not the first.
+     * For a genuine fast tap the user might release at ~150 ms, but the hardware
+     * still emits a second line at ~184 ms, causing the UP to arrive at 784 ms.
+     * With LONG_PRESS_MS=700 ms the long-press timer fires first at 705 ms, making
+     * the single tap look like a long press.
+     *
+     * Fix: anchor the UP timer to downTime (first DOWN line).  The UP fires exactly
+     * (RELEASE_PAUSE_DUAL_MS) ms after the key was first detected, regardless of
+     * how many repeat lines the OEM emits.  This makes UP delivery deterministic and
+     * lets LONG_PRESS_MS safely exceed RELEASE_PAUSE_DUAL_MS by a reliable margin.
+     */
+    private long             downTime      = 0;
     private volatile boolean isDown        = false;
     private final Handler    mainHandler   = new Handler(Looper.getMainLooper());
     private Runnable         upRunnable;
@@ -525,16 +546,26 @@ public class LogcatWatcher implements Runnable {
         long gap = now - lastEventTime;
         if (!isDown) {
             if (gap < DEBOUNCE_MS) return;
-            isDown = true;
+            isDown     = true;
+            downTime   = now;          // anchor: record first DOWN timestamp
             lastEventTime = now;
             Log.d(TAG, "Plus Key DOWN");
             service.handleLogcatKey("down");
         } else {
+            // Key is already down — OEM hardware is emitting a repeat line while
+            // the user holds the key.  Update lastEventTime for debounce purposes
+            // but do NOT reschedule the UP runnable.  The UP timer was posted at
+            // DOWN time anchored to downTime; rescheduling it here would push the
+            // synthetic UP further into the future on every repeat line and cause
+            // a false long-press for genuine fast taps (see downTime field doc).
             lastEventTime = now;
+            return;
         }
+        // Only reached on the first (DOWN) line of a press cycle.
         if (upRunnable != null) mainHandler.removeCallbacks(upRunnable);
         upRunnable = () -> {
-            isDown = false;
+            isDown   = false;
+            downTime = 0;
             Log.d(TAG, "Plus Key UP");
             service.handleLogcatKey("up");
         };

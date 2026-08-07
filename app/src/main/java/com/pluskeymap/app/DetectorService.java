@@ -77,11 +77,20 @@ public class DetectorService extends Service {
     private long lastActionTime = 0;
     private static final long ACTION_DEBOUNCE_MS    = 700;
     // Must be strictly greater than LogcatWatcher.RELEASE_PAUSE_DUAL_MS (600 ms).
-    // The watcher fires a synthetic UP after 600 ms of logcat silence following the
-    // last key line.  If LONG_PRESS_MS ≤ 600 ms, a genuine fast tap's UP arrives
-    // after longPressRunnable already fired — causing a false long press.
-    // At 700 ms: fast-tap UP arrives at ~600 ms → dispatches single ✓
-    //            real long press fires at 700 ms (key held ≥ 700 ms) ✓
+    //
+    // LogcatWatcher now anchors the synthetic UP timer to the first DOWN logcat line
+    // (downTime), so it is delivered exactly RELEASE_PAUSE_DUAL_MS (600 ms) after
+    // the first key line regardless of how many OEM repeat lines the hardware emits.
+    // This makes UP delivery deterministic: UP always arrives at downTime + 600 ms.
+    //
+    // LONG_PRESS_MS must still exceed RELEASE_PAUSE_DUAL_MS so that for a genuine
+    // fast tap the UP (at +600 ms) always beats longPressRunnable (at +700 ms):
+    //   Fast tap → UP at +600 ms → cancel longPressRunnable → dispatch single ✓
+    //   Real long press → key held ≥ 700 ms → longPressRunnable fires first ✓
+    //
+    // Previously the UP was re-scheduled on every OEM repeat line, so even a tap
+    // could produce an UP at +784 ms (last repeat at +184 ms + 600 ms), causing
+    // longPressRunnable to fire at +700 ms first — a false long press.
     private static final long LONG_PRESS_MS         = 700;
     private static final long SINGLE_CONFIRM_MS     = 150;
     private static final long SINGLE_CONFIRM_FAST_MS = 80;
@@ -315,8 +324,10 @@ public class DetectorService extends Service {
     //   DOWN → arm singleRunnable (150 ms) AND longPressRunnable (700 ms)
     //
     //   CRITICAL: LONG_PRESS_MS (700 ms) MUST be > LogcatWatcher.RELEASE_PAUSE_DUAL_MS (600 ms).
-    //   The watcher holds the UP event for 600 ms of logcat silence after the last key line.
-    //   If LONG_PRESS_MS ≤ 600 ms, a genuine tap's UP arrives after longPressRunnable fires.
+    //   LogcatWatcher anchors the synthetic UP to the first DOWN logcat line (downTime), so
+    //   UP is always delivered at downTime + 600 ms — deterministic regardless of OEM repeat
+    //   lines.  (Previously UP was re-scheduled on every repeat line, so OEM hardware emitting
+    //   a second line at +184 ms would push UP to +784 ms, causing a false long press at +700 ms.)
     //
     //   If longPressRunnable fires first (key held ≥ 700 ms) → cancel singleRunnable → dispatch long
     //   If UP arrives before longPressRunnable fires AND singleRunnable already fired

@@ -369,19 +369,48 @@ public class DetectorService extends Service {
                 return;
             }
 
-            // Dual mode: UP determines which action to fire.
-            // Cancel both timers — we are deciding right now.
-            handler.removeCallbacks(singleRunnable);
-            handler.removeCallbacks(longPressRunnable);
-            handler.removeCallbacks(resetRunnable);
-            longPressArmed = false;
+            // ── Dual mode: UP determines which action to fire ──────────────────────
+            //
+            // IMPORTANT: we must check for noise BEFORE cancelling longPressRunnable.
+            // OxygenOS hardware emits a logcat UP line ~50 ms after every DOWN line even
+            // during a genuine long press (because the OS only logs key-state changes, not
+            // continuous held events).  With RELEASE_PAUSE_DUAL_MS=600 ms the watcher
+            // waits 600 ms before synthesising an UP, so this branch is only reached when
+            // the user genuinely releases quickly (< SINGLE_CONFIRM_MS) — in which case
+            // we keep the long-press timer alive in case the user is still holding the key
+            // and the watcher just delivered an early UP due to a transient logging gap.
 
             if (longPressFired) {
                 // longPressRunnable already fired before UP arrived — nothing more to do.
                 logd("UP — long press already fired, resetting");
+                handler.removeCallbacks(singleRunnable);
+                handler.removeCallbacks(longPressRunnable);
+                handler.removeCallbacks(resetRunnable);
+                longPressArmed = false;
                 handler.postDelayed(resetRunnable, 200);
                 return;
             }
+
+            if (!singleFired && heldMs < SINGLE_CONFIRM_MS) {
+                // Released before the confirm timer fired.
+                // In dual mode: keep longPressRunnable armed so a genuine long press can
+                // still be detected.  Only cancel the singleRunnable (it hasn't fired yet
+                // and we don't want a spurious tap to be dispatched).
+                // longPressArmed stays TRUE — do NOT disarm here.
+                logd("UP before confirm (" + heldMs + "ms) — noise, ignoring (keeping long-press armed)");
+                singleFired    = false;
+                longPressFired = false;
+                handler.removeCallbacks(singleRunnable);
+                handler.removeCallbacks(resetRunnable);
+                // DO NOT cancel longPressRunnable, DO NOT set longPressArmed = false.
+                return;
+            }
+
+            // Real UP: cancel all pending timers and decide the action.
+            handler.removeCallbacks(singleRunnable);
+            handler.removeCallbacks(longPressRunnable);
+            handler.removeCallbacks(resetRunnable);
+            longPressArmed = false;
 
             if (singleFired) {
                 // Key was held past SINGLE_CONFIRM_MS but released before LONG_PRESS_MS.
@@ -394,8 +423,9 @@ public class DetectorService extends Service {
                         ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
                 handler.postDelayed(resetRunnable, 400);
             } else {
-                // Released before even the confirm timer fired — too fast, treat as noise.
-                logd("UP before confirm (" + heldMs + "ms) — noise, ignoring");
+                // singleFired=false but heldMs >= SINGLE_CONFIRM_MS — shouldn't normally
+                // happen; treat conservatively as a short tap with no action.
+                logd("UP — heldMs=" + heldMs + " no action state, ignoring");
                 singleFired    = false;
                 longPressFired = false;
             }
@@ -466,6 +496,11 @@ public class DetectorService extends Service {
             try { logcatThread.join(300); } catch (InterruptedException ignored) {}
         }
         logcatWatcher = new LogcatWatcher(this, broad);
+        // Propagate the current button-behaviour mode so the watcher uses the
+        // correct release-pause duration from the very first key event.
+        boolean dualMode = !getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
+                .getBoolean(SettingsActivity.KEY_SINGLE_ONLY_MODE, true);
+        logcatWatcher.setDualMode(dualMode);
         logcatThread  = new Thread(logcatWatcher, "pkm-logcat");
         logcatThread.setDaemon(true);
         logcatThread.start();

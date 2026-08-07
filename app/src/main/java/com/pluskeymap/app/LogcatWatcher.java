@@ -24,8 +24,13 @@ import java.nio.charset.StandardCharsets;
 public class LogcatWatcher implements Runnable {
 
     private static final String TAG              = "PKM_Logcat";
-    private static final long   DEBOUNCE_MS      = 30;
-    private static final long   RELEASE_PAUSE_MS = 50;
+    private static final long   DEBOUNCE_MS             = 30;
+    // In single-only mode a 50 ms silence after the last logcat line is enough to
+    // declare "key released".  In dual mode we must wait longer than LONG_PRESS_MS
+    // (500 ms) so that the synthetic UP doesn't fire and cancel the long-press cycle
+    // before longPressRunnable has a chance to trigger.
+    private static final long   RELEASE_PAUSE_SINGLE_MS = 50;
+    private static final long   RELEASE_PAUSE_DUAL_MS   = 600;
     // Max wait for first line before declaring permission denied.
     private static final long   FIRST_LINE_TIMEOUT_MS  = 20_000;
     // Max wait for an OEM key tag line after generic logcat access is confirmed.
@@ -117,6 +122,18 @@ public class LogcatWatcher implements Runnable {
 
     private final DetectorService service;
     private volatile boolean running = true;
+
+    /**
+     * Release-pause duration currently in use.  Updated by DetectorService
+     * whenever the user toggles single-only / dual mode so that the watcher
+     * immediately adopts the right timeout without a restart.
+     */
+    private volatile long releasePauseMs = RELEASE_PAUSE_SINGLE_MS;
+
+    /** Called by DetectorService whenever the button-behaviour mode changes. */
+    public void setDualMode(boolean dual) {
+        releasePauseMs = dual ? RELEASE_PAUSE_DUAL_MS : RELEASE_PAUSE_SINGLE_MS;
+    }
 
     volatile Process logcatProcess;
 
@@ -521,6 +538,6 @@ public class LogcatWatcher implements Runnable {
             Log.d(TAG, "Plus Key UP");
             service.handleLogcatKey("up");
         };
-        mainHandler.postDelayed(upRunnable, RELEASE_PAUSE_MS);
+        mainHandler.postDelayed(upRunnable, releasePauseMs);
     }
 }

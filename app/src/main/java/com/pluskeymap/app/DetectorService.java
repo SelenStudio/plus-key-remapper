@@ -77,12 +77,13 @@ public class DetectorService extends Service {
     private long lastActionTime = 0;
     private static final long ACTION_DEBOUNCE_MS    = 700;
     private static final long LONG_PRESS_MS         = 500;
-    private static final long SINGLE_CONFIRM_MS     = 400;
+    private static final long SINGLE_CONFIRM_MS     = 150;
     private static final long SINGLE_CONFIRM_FAST_MS = 80;
     private static final long SINGLE_COMMIT_MS      = 700;
     private static final long POST_SINGLE_GUARD_MS  = 900;
     private long    lastDownTime   = 0;
     private boolean longPressArmed = false;
+    private boolean longPressFired  = false;
     private boolean singleFired    = false;
     private boolean singlePending  = false;
 
@@ -132,52 +133,56 @@ public class DetectorService extends Service {
 
         if (handler == null) {
             handler = new Handler(Looper.getMainLooper());
+
+            // singleRunnable: fires after SINGLE_CONFIRM_MS following a DOWN.
+            // In single-only mode → immediately execute single action.
+            // In dual mode → just mark that we have a confirmed press; the UP event
+            // will decide whether it was a tap (short) or long press (long held).
             singleRunnable = () -> {
                 boolean singleOnly = getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
                         .getBoolean(SettingsActivity.KEY_SINGLE_ONLY_MODE, true);
                 if (singleOnly) {
                     logd("singleRunnable fired → single-only mode, instant commit");
-                    singleFired   = true;
-                    singlePending = false;
+                    singleFired    = true;
+                    singlePending  = false;
                     lastActionTime = System.currentTimeMillis();
                     dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
                             ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
                             ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
                     handler.postDelayed(resetRunnable, 400);
                 } else {
-                    logd("singleRunnable fired → arming release-pulse guard (" + POST_SINGLE_GUARD_MS + "ms)");
+                    // Dual mode: the press is confirmed real. Wait for UP to decide action type.
+                    logd("singleRunnable fired → dual mode, press confirmed, waiting for UP");
                     singleFired   = true;
-                    singlePending = true;
-                    lastActionTime = System.currentTimeMillis();
-                    handler.postDelayed(resetRunnable, POST_SINGLE_GUARD_MS);
+                    singlePending = false; // UP handler will dispatch, not resetRunnable
                 }
             };
-            singleCommitRunnable = () -> { /* kept for safety */ };
+
+            singleCommitRunnable = () -> { /* kept for API compatibility */ };
+
+            // longPressRunnable: fires after LONG_PRESS_MS following a DOWN in dual mode.
+            // Cancels any pending single-tap and immediately fires the long-press action.
             longPressRunnable = () -> {
                 logd("longPressRunnable fired → action_long");
                 handler.removeCallbacks(singleRunnable);
                 handler.removeCallbacks(resetRunnable);
-                singlePending  = false;
-                singleFired    = false;
-                longPressArmed = false;
-                lastActionTime = System.currentTimeMillis();
+                singlePending   = false;
+                singleFired     = false;
+                longPressArmed  = false;
+                longPressFired  = true;
+                lastActionTime  = System.currentTimeMillis();
                 dispatchAction(ActionExecutor.KEY_ACTION_LONG,
                         ActionExecutor.KEY_LAUNCH_PKG_LONG,
                         ActionExecutor.KEY_CUSTOM_INTENT_LONG);
             };
+
+            // resetRunnable: cleans up state after an action cycle completes.
             resetRunnable = () -> {
-                if (singlePending) {
-                    logd("resetRunnable: no pulse → committing single");
-                    singlePending  = false;
-                    lastActionTime = System.currentTimeMillis();
-                    dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
-                            ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
-                            ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
-                } else {
-                    logd("resetRunnable: bounce window expired, resetting cycle");
-                }
+                logd("resetRunnable: cycle complete, resetting state");
                 singleFired    = false;
+                singlePending  = false;
                 longPressArmed = false;
+                longPressFired = false;
             };
         }
         prefs = ActionExecutor.prefs(this);
@@ -258,22 +263,37 @@ public class DetectorService extends Service {
     }
 
     // ── Core gesture state machine ──────────────────────────────────────────
+    //
+    // Single-only mode:
+    //   DOWN → arm singleRunnable (80 ms noise guard) → fires → dispatch single
+    //
+    // Dual mode (single + long press):
+    //   DOWN → arm singleRunnable (150 ms noise guard) AND longPressRunnable (500 ms)
+    //   If longPressRunnable fires first → cancel singleRunnable → dispatch long
+    //   If UP arrives before longPressRunnable fires AND singleRunnable already fired
+    //       → cancel longPressRunnable → dispatch single
+    //   If UP arrives before singleRunnable fires (noise / very fast tap < 150 ms)
+    //       → cancel both → ignore (treat as noise)
 
     private void processKeyEvent(String action) {
         logd("processKeyEvent: " + action);
 
         if ("down".equals(action)) {
-            long now         = System.currentTimeMillis();
-            long upToDownGap = now - lastUpTime;
+            long now           = System.currentTimeMillis();
+            long upToDownGap   = now - lastUpTime;
             long downToDownGap = now - lastDownTime;
 
+            // Ignore rapid DOWN events immediately after an UP (hardware bounce / noise).
             if (lastUpTime > 0 && upToDownGap < 150) {
                 logd("Noise DOWN ignored (upGap=" + upToDownGap + "ms)");
                 return;
             }
 
-            if (singleFired && lastDownTime > 0 && downToDownGap < 500) {
-                logd("Noise DOWN ignored (downGap=" + downToDownGap + "ms, singleFired guard)");
+            // Ignore a DOWN that arrives very soon after a previous DOWN when an action
+            // was already fired (protects against the repeated-logcat-line stream from
+            // the OEM key being treated as a new press cycle).
+            if ((singleFired || longPressFired) && lastDownTime > 0 && downToDownGap < 600) {
+                logd("Noise DOWN ignored (downGap=" + downToDownGap + "ms, action-fired guard)");
                 return;
             }
 
@@ -292,42 +312,89 @@ public class DetectorService extends Service {
 
             if (detectMode) { logd("Detect mode — action suppressed"); return; }
 
+            // Only start a new press cycle when no cycle is already in progress.
             if (!longPressArmed) {
                 boolean singleOnly = getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
                         .getBoolean(SettingsActivity.KEY_SINGLE_ONLY_MODE, true);
-                long confirmMs = singleOnly ? SINGLE_CONFIRM_FAST_MS : SINGLE_CONFIRM_MS;
-                longPressArmed = true;
-                singleFired = false;
-                lastDownTime = now;
-                handler.postDelayed(singleRunnable, confirmMs);
-                logd("DOWN — single confirm timer armed (" + confirmMs + "ms)");
-            } else if (singleFired) {
-                boolean singleOnly = getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
-                        .getBoolean(SettingsActivity.KEY_SINGLE_ONLY_MODE, true);
-                if (singleOnly) {
-                    logd("DOWN bounce discarded (single-only mode, singleFired guard)");
-                    return;
-                }
-                long sinceAction = now - lastActionTime;
-                logd("DOWN release pulse (" + sinceAction + "ms since single) → long press");
-                handler.removeCallbacks(singleRunnable);
-                handler.removeCallbacks(singleCommitRunnable);
-                handler.removeCallbacks(resetRunnable);
-                singlePending  = false;
-                longPressArmed = false;
+
+                // Reset all state for a clean cycle.
                 singleFired    = false;
-                lastActionTime = now;
-                dispatchAction(ActionExecutor.KEY_ACTION_LONG,
-                        ActionExecutor.KEY_LAUNCH_PKG_LONG,
-                        ActionExecutor.KEY_CUSTOM_INTENT_LONG);
+                singlePending  = false;
+                longPressFired = false;
+                longPressArmed = true;
+
+                if (singleOnly) {
+                    // Single-only: short noise guard then immediately fire.
+                    handler.postDelayed(singleRunnable, SINGLE_CONFIRM_FAST_MS);
+                    logd("DOWN (single-only) — confirm timer armed (" + SINGLE_CONFIRM_FAST_MS + "ms)");
+                } else {
+                    // Dual mode: arm both timers. longPressRunnable wins if the key is
+                    // held past LONG_PRESS_MS; otherwise UP will dispatch single.
+                    handler.postDelayed(singleRunnable,    SINGLE_CONFIRM_MS);
+                    handler.postDelayed(longPressRunnable, LONG_PRESS_MS);
+                    logd("DOWN (dual) — confirm=" + SINGLE_CONFIRM_MS
+                            + "ms, longPress=" + LONG_PRESS_MS + "ms timers armed");
+                }
             } else {
-                handler.removeCallbacks(singleRunnable);
-                handler.postDelayed(singleRunnable, SINGLE_CONFIRM_MS);
-                logd("DOWN before single fired — timer reset");
+                // Already armed — this is a repeated logcat line while key is held.
+                // Nothing to do; timers are already running.
+                logd("DOWN repeat while armed — ignored");
             }
 
         } else if ("up".equals(action)) {
-            lastUpTime = System.currentTimeMillis();
+            long now = System.currentTimeMillis();
+            lastUpTime = now;
+
+            if (!longPressArmed) {
+                // No active cycle (e.g. already fired and reset, or spurious UP).
+                logd("UP — no active cycle, ignored");
+                return;
+            }
+
+            long heldMs = now - lastDownTime;
+            logd("UP — heldMs=" + heldMs + " singleFired=" + singleFired
+                    + " longPressFired=" + longPressFired);
+
+            boolean singleOnly = getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
+                    .getBoolean(SettingsActivity.KEY_SINGLE_ONLY_MODE, true);
+
+            if (singleOnly) {
+                // Single-only mode: singleRunnable already fired or will fire shortly.
+                // Just clean up the armed flag; singleRunnable handles dispatch.
+                longPressArmed = false;
+                return;
+            }
+
+            // Dual mode: UP determines which action to fire.
+            // Cancel both timers — we are deciding right now.
+            handler.removeCallbacks(singleRunnable);
+            handler.removeCallbacks(longPressRunnable);
+            handler.removeCallbacks(resetRunnable);
+            longPressArmed = false;
+
+            if (longPressFired) {
+                // longPressRunnable already fired before UP arrived — nothing more to do.
+                logd("UP — long press already fired, resetting");
+                handler.postDelayed(resetRunnable, 200);
+                return;
+            }
+
+            if (singleFired) {
+                // Key was held past SINGLE_CONFIRM_MS but released before LONG_PRESS_MS.
+                // This is a normal single tap.
+                logd("UP after confirm → dispatch single (held " + heldMs + "ms)");
+                singleFired    = false;
+                lastActionTime = now;
+                dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
+                        ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
+                        ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
+                handler.postDelayed(resetRunnable, 400);
+            } else {
+                // Released before even the confirm timer fired — too fast, treat as noise.
+                logd("UP before confirm (" + heldMs + "ms) — noise, ignoring");
+                singleFired    = false;
+                longPressFired = false;
+            }
         }
     }
 
@@ -499,6 +566,7 @@ public class DetectorService extends Service {
             handler.removeCallbacks(resetRunnable);
         }
         longPressArmed = false;
+        longPressFired = false;
         singleFired    = false;
         singlePending  = false;
         if (screenOffReceiver != null) {

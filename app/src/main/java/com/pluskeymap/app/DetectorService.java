@@ -498,23 +498,59 @@ public class DetectorService extends Service {
                 return;
             }
 
-            // Real UP: cancel all pending timers and decide the action.
+            // Real UP: cancel pending timers and decide the action.
+            // NOTE: longPressRunnable is cancelled here but may be re-armed below if we
+            // cannot yet confirm whether the user genuinely released before the long-press
+            // deadline (see the singleFired + heldMs check below).
             handler.removeCallbacks(singleRunnable);
-            handler.removeCallbacks(longPressRunnable);
             handler.removeCallbacks(resetRunnable);
-            longPressArmed = false;
 
             if (singleFired) {
-                // Key was held past SINGLE_CONFIRM_MS but released before LONG_PRESS_MS.
-                // This is a normal single tap.
-                logd("UP after confirm → dispatch single (held " + heldMs + "ms)");
+                // Press was confirmed past SINGLE_CONFIRM_MS.  Now determine whether the
+                // UP is genuine (user released before LONG_PRESS_MS → single tap) or
+                // spurious (watcher timeout fired during an ongoing hold → long press).
+                //
+                // The watcher synthesises UP after RELEASE_PAUSE_DUAL_MS (600 ms) of
+                // logcat silence after the DOWN line.  If the OEM emits only one logcat
+                // line (at DOWN time) the UP always arrives at downTime+600ms — before
+                // LONG_PRESS_MS (850 ms).  We cannot distinguish this from a genuine
+                // single tap release purely from heldMs.
+                //
+                // Strategy: if heldMs < LONG_PRESS_MS, defer dispatch via noiseUpRunnable
+                // (same window used for sub-150ms fast taps).  If the user is still
+                // holding, a new DOWN will arrive within NOISE_UP_CONFIRM_MS and cancel
+                // the single dispatch, keeping longPressRunnable counting.  If no DOWN
+                // arrives the user genuinely released early → dispatch single.
+                if (heldMs < LONG_PRESS_MS) {
+                    logd("UP after confirm (held " + heldMs + "ms) — deferring single via noiseUpRunnable"
+                            + " (" + NOISE_UP_CONFIRM_MS + "ms) to rule out spurious watcher UP");
+                    singleFired    = false;
+                    longPressFired = false;
+                    handler.removeCallbacks(noiseUpRunnable);
+                    // Keep longPressRunnable alive — it is still the arbiter if the user
+                    // is actually holding past LONG_PRESS_MS.  Cancel it only if
+                    // noiseUpRunnable concludes it was a genuine tap.
+                    handler.postDelayed(noiseUpRunnable, NOISE_UP_CONFIRM_MS);
+                    // DO NOT cancel longPressRunnable, DO NOT clear longPressArmed.
+                    return;
+                }
+                // heldMs >= LONG_PRESS_MS: the UP arrived after the long-press deadline.
+                // longPressRunnable should have fired first; if we are here it lost the
+                // race.  Cancel it and dispatch long press directly.
+                handler.removeCallbacks(longPressRunnable);
+                longPressArmed = false;
+                logd("UP after confirm but heldMs=" + heldMs + " >= LONG_PRESS_MS=" + LONG_PRESS_MS
+                        + " — dispatching long press (longPressRunnable lost race)");
                 singleFired    = false;
                 lastActionTime = now;
-                dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
-                        ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
-                        ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
+                longPressFired = true;
+                dispatchAction(ActionExecutor.KEY_ACTION_LONG,
+                        ActionExecutor.KEY_LAUNCH_PKG_LONG,
+                        ActionExecutor.KEY_CUSTOM_INTENT_LONG);
                 handler.postDelayed(resetRunnable, 400);
             } else {
+                handler.removeCallbacks(longPressRunnable);
+                longPressArmed = false;
                 // singleFired=false but heldMs >= SINGLE_CONFIRM_MS — shouldn't normally
                 // happen; treat conservatively as a short tap with no action.
                 logd("UP — heldMs=" + heldMs + " no action state, ignoring");

@@ -119,6 +119,13 @@ public class DetectorService extends Service {
     private Runnable resetRunnable;
     /** Posted after a fast UP (< SINGLE_CONFIRM_MS) to confirm genuine fast tap. */
     private Runnable noiseUpRunnable;
+    /**
+     * Posted after UP arrives with singleFired=true but heldMs < LONG_PRESS_MS.
+     * Gives a short window to detect if the user is still holding (new DOWN arrives)
+     * before committing to single-tap dispatch.  Cancelled by the DOWN handler if a
+     * new press starts before it fires.
+     */
+    private Runnable confirmSingleRunnable;
     private Handler  handler;
 
     // ── Service lifecycle ───────────────────────────────────────────────────
@@ -235,6 +242,20 @@ public class DetectorService extends Service {
                 handler.removeCallbacks(longPressRunnable);
                 longPressArmed = false;
                 singleFired    = false;
+                lastActionTime = System.currentTimeMillis();
+                dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
+                        ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
+                        ActionExecutor.KEY_CUSTOM_INTENT_SINGLE);
+                handler.postDelayed(resetRunnable, 400);
+            };
+
+            // confirmSingleRunnable: posted after UP arrives with singleFired=true but
+            // heldMs < LONG_PRESS_MS.  After a short delay (≤ NOISE_UP_CONFIRM_MS) with
+            // no new DOWN, we conclude the user genuinely released before the long-press
+            // threshold and dispatch the single action.  If a new DOWN arrives first the
+            // DOWN handler cancels this runnable before starting the next cycle.
+            confirmSingleRunnable = () -> {
+                logd("confirmSingleRunnable fired — dispatching single");
                 lastActionTime = System.currentTimeMillis();
                 dispatchAction(ActionExecutor.KEY_ACTION_SINGLE,
                         ActionExecutor.KEY_LAUNCH_PKG_SINGLE,
@@ -399,6 +420,9 @@ public class DetectorService extends Service {
                 boolean singleOnly = getSharedPreferences(SettingsActivity.PREFS_SETTINGS, MODE_PRIVATE)
                         .getBoolean(SettingsActivity.KEY_SINGLE_ONLY_MODE, true);
 
+                // Cancel any pending deferred single from a previous press cycle.
+                handler.removeCallbacks(confirmSingleRunnable);
+
                 // Reset all state for a clean cycle.
                 singleFired    = false;
                 singlePending  = false;
@@ -498,12 +522,10 @@ public class DetectorService extends Service {
                 return;
             }
 
-            // Real UP: cancel pending timers and decide the action.
-            // NOTE: longPressRunnable is cancelled here but may be re-armed below if we
-            // cannot yet confirm whether the user genuinely released before the long-press
-            // deadline (see the singleFired + heldMs check below).
+            // Real UP: cancel all pending timers.
             handler.removeCallbacks(singleRunnable);
             handler.removeCallbacks(resetRunnable);
+            handler.removeCallbacks(noiseUpRunnable);
 
             if (singleFired) {
                 // Press was confirmed past SINGLE_CONFIRM_MS.  Now determine whether the
@@ -516,25 +538,28 @@ public class DetectorService extends Service {
                 // LONG_PRESS_MS (850 ms).  We cannot distinguish this from a genuine
                 // single tap release purely from heldMs.
                 //
-                // Strategy: if heldMs < LONG_PRESS_MS, defer dispatch via noiseUpRunnable
-                // (same window used for sub-150ms fast taps).  If the user is still
-                // holding, a new DOWN will arrive within NOISE_UP_CONFIRM_MS and cancel
-                // the single dispatch, keeping longPressRunnable counting.  If no DOWN
-                // arrives the user genuinely released early → dispatch single.
+                // Strategy: if heldMs < LONG_PRESS_MS, cancel longPressRunnable and
+                // defer dispatch via a short confirmSingleRunnable window.  If the user
+                // is still holding, a new DOWN will arrive and start a fresh long-press
+                // cycle.  If no DOWN arrives, the user genuinely released → dispatch single.
+                //
+                // CRITICAL: longPressRunnable MUST be cancelled before posting
+                // confirmSingleRunnable.  Leaving it alive while posting a 200ms defer
+                // causes a double-fire when longPressRunnable's remaining time (e.g. 143ms)
+                // is less than the defer window (200ms) — longPressRunnable fires first,
+                // then confirmSingleRunnable fires, dispatching both actions.
                 if (heldMs < LONG_PRESS_MS) {
-                    logd("UP after confirm (held " + heldMs + "ms) — deferring single via noiseUpRunnable"
-                            + " (" + NOISE_UP_CONFIRM_MS + "ms) to rule out spurious watcher UP");
+                    handler.removeCallbacks(longPressRunnable);
+                    longPressArmed = false;
                     singleFired    = false;
-                    longPressFired = false;
-                    handler.removeCallbacks(noiseUpRunnable);
-                    // Keep longPressRunnable alive — it is still the arbiter if the user
-                    // is actually holding past LONG_PRESS_MS.  Cancel it only if
-                    // noiseUpRunnable concludes it was a genuine tap.
-                    handler.postDelayed(noiseUpRunnable, NOISE_UP_CONFIRM_MS);
-                    // DO NOT cancel longPressRunnable, DO NOT clear longPressArmed.
+                    long confirmDelay = Math.min(NOISE_UP_CONFIRM_MS, LONG_PRESS_MS - heldMs);
+                    logd("UP after confirm (held " + heldMs + "ms < " + LONG_PRESS_MS + "ms)"
+                            + " — deferring single " + confirmDelay + "ms to rule out spurious watcher UP");
+                    handler.removeCallbacks(confirmSingleRunnable);
+                    handler.postDelayed(confirmSingleRunnable, confirmDelay);
                     return;
                 }
-                // heldMs >= LONG_PRESS_MS: the UP arrived after the long-press deadline.
+                // heldMs >= LONG_PRESS_MS: UP arrived after the long-press deadline.
                 // longPressRunnable should have fired first; if we are here it lost the
                 // race.  Cancel it and dispatch long press directly.
                 handler.removeCallbacks(longPressRunnable);
@@ -732,6 +757,7 @@ public class DetectorService extends Service {
             handler.removeCallbacks(singleCommitRunnable);
             handler.removeCallbacks(resetRunnable);
             handler.removeCallbacks(noiseUpRunnable);
+            handler.removeCallbacks(confirmSingleRunnable);
         }
         longPressArmed = false;
         longPressFired = false;

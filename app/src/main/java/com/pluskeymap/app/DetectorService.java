@@ -76,7 +76,13 @@ public class DetectorService extends Service {
     private long lastUpTime    = 0;
     private long lastActionTime = 0;
     private static final long ACTION_DEBOUNCE_MS    = 700;
-    private static final long LONG_PRESS_MS         = 500;
+    // Must be strictly greater than LogcatWatcher.RELEASE_PAUSE_DUAL_MS (600 ms).
+    // The watcher fires a synthetic UP after 600 ms of logcat silence following the
+    // last key line.  If LONG_PRESS_MS ≤ 600 ms, a genuine fast tap's UP arrives
+    // after longPressRunnable already fired — causing a false long press.
+    // At 700 ms: fast-tap UP arrives at ~600 ms → dispatches single ✓
+    //            real long press fires at 700 ms (key held ≥ 700 ms) ✓
+    private static final long LONG_PRESS_MS         = 700;
     private static final long SINGLE_CONFIRM_MS     = 150;
     private static final long SINGLE_CONFIRM_FAST_MS = 80;
     private static final long SINGLE_COMMIT_MS      = 700;
@@ -306,12 +312,17 @@ public class DetectorService extends Service {
     //   DOWN → arm singleRunnable (80 ms noise guard) → fires → dispatch single
     //
     // Dual mode (single + long press):
-    //   DOWN → arm singleRunnable (150 ms noise guard) AND longPressRunnable (500 ms)
-    //   If longPressRunnable fires first → cancel singleRunnable → dispatch long
+    //   DOWN → arm singleRunnable (150 ms) AND longPressRunnable (700 ms)
+    //
+    //   CRITICAL: LONG_PRESS_MS (700 ms) MUST be > LogcatWatcher.RELEASE_PAUSE_DUAL_MS (600 ms).
+    //   The watcher holds the UP event for 600 ms of logcat silence after the last key line.
+    //   If LONG_PRESS_MS ≤ 600 ms, a genuine tap's UP arrives after longPressRunnable fires.
+    //
+    //   If longPressRunnable fires first (key held ≥ 700 ms) → cancel singleRunnable → dispatch long
     //   If UP arrives before longPressRunnable fires AND singleRunnable already fired
     //       → cancel longPressRunnable → dispatch single
-    //   If UP arrives before singleRunnable fires (noise / very fast tap < 150 ms)
-    //       → cancel both → ignore (treat as noise)
+    //   If UP arrives before singleRunnable fires (fast tap < 150 ms)
+    //       → post noiseUpRunnable(200 ms): if no bounce DOWN → dispatch single; else stay armed
 
     private void processKeyEvent(String action) {
         logd("processKeyEvent: " + action);
@@ -385,8 +396,9 @@ public class DetectorService extends Service {
                     // held past LONG_PRESS_MS; otherwise UP will dispatch single.
                     handler.postDelayed(singleRunnable,    SINGLE_CONFIRM_MS);
                     handler.postDelayed(longPressRunnable, LONG_PRESS_MS);
-                    logd("DOWN (dual) — confirm=" + SINGLE_CONFIRM_MS
-                            + "ms, longPress=" + LONG_PRESS_MS + "ms timers armed");
+                    logd("DOWN (dual) — confirm=" + SINGLE_CONFIRM_MS + "ms"
+                            + ", longPress=" + LONG_PRESS_MS + "ms"
+                            + " (> watcher pause 600ms) timers armed");
                 }
             } else {
                 // Already armed — this is a repeated logcat line while key is held.

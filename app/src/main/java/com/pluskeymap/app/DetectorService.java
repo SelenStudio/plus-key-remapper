@@ -162,13 +162,17 @@ public class DetectorService extends Service {
 
             // longPressRunnable: fires after LONG_PRESS_MS following a DOWN in dual mode.
             // Cancels any pending single-tap and immediately fires the long-press action.
+            // NOTE: longPressArmed intentionally stays TRUE here so that any repeated
+            // logcat DOWN lines still arriving while the key is physically held do NOT
+            // restart a new press cycle (which would re-arm singleRunnable and cause a
+            // spurious single-tap dispatch when the key is finally released).
             longPressRunnable = () -> {
                 logd("longPressRunnable fired → action_long");
                 handler.removeCallbacks(singleRunnable);
                 handler.removeCallbacks(resetRunnable);
                 singlePending   = false;
                 singleFired     = false;
-                longPressArmed  = false;
+                // Keep longPressArmed = true — cleared by UP handler once key is released.
                 longPressFired  = true;
                 lastActionTime  = System.currentTimeMillis();
                 dispatchAction(ActionExecutor.KEY_ACTION_LONG,

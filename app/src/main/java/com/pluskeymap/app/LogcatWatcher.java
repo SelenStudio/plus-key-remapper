@@ -50,6 +50,22 @@ public class LogcatWatcher implements Runnable {
      */
     private static volatile long sForegroundPackageTimestamp = 0;
 
+    /**
+     * True when sForegroundPackage was last written by the AccessibilityService
+     * (higher-fidelity source) rather than the logcat parser.
+     *
+     * When this flag is set AND the current package is NOT a camera app, the
+     * logcat parser is blocked from overwriting the field with a camera package.
+     * This prevents the race condition where trailing logcat lines from the
+     * camera session (e.g. "pkg=com.oplus.camera" from SurfaceControl teardown)
+     * re-poison the foreground state after the a11y has already correctly
+     * reported that the user returned to the launcher.
+     *
+     * The flag is cleared whenever logcat writes a non-camera package so that
+     * logcat can still update the field normally in all other scenarios.
+     */
+    private static volatile boolean sLastWriteByA11y = false;
+
     /** Returns the last known foreground package, or null if not yet seen. */
     public static String getForegroundPackage() {
         return sForegroundPackage;
@@ -75,13 +91,14 @@ public class LogcatWatcher implements Runnable {
      * (via cmp=/SurfaceView lines) but does NOT see camera *exit*, because the
      * launcher/home screen does not emit those logcat lines when it resumes.
      *
-     * Thread-safe: both fields are volatile.
+     * Thread-safe: all fields are volatile.
      */
     public static void setForegroundPackage(String pkg) {
         if (pkg == null || pkg.equals(sForegroundPackage)) return;
         Log.d(TAG, "setForegroundPackage [a11y]: " + pkg);
         sForegroundPackage = pkg;
         sForegroundPackageTimestamp = System.currentTimeMillis();
+        sLastWriteByA11y = true;
     }
 
     private static final String[] TAG_PATTERNS = {
@@ -395,25 +412,52 @@ public class LogcatWatcher implements Runnable {
 
     /**
      * Packages whose logcat noise we must ignore entirely — they appear in
-     * log lines constantly from background services, not because the user
-     * brought them to the foreground.
+     * log lines constantly from background services or system overlays, never
+     * because the user explicitly brought them to the foreground.
      *
-     * com.pluskeymap.app    — our own process: emits pkg= lines on every key
-     *                         dispatch, immediately after a camera shutter fire.
+     * com.pluskeymap.app      — our own process: emits pkg= lines on every key
+     *                           dispatch, immediately after a camera shutter fire.
      * com.paget96.batteryguru — battery overlay: floods pkg= every ~5 s from
-     *                         its notification/tile update service.
-     *
-     * NOTE: com.android.systemui is intentionally NOT in this set.
-     * When the user swipes down the notification shade while the camera is open,
-     * systemui becomes the top window.  We must let that signal clear the stale
-     * "com.oplus.camera" foreground state so the next key press returns to
-     * the normal single-tap action instead of firing the shutter into thin air.
+     *                           its notification/tile update service.
+     * com.android.systemui    — fires pkg=/cmp= in logcat on every status-bar
+     *                           update, volume panel, toast, etc. The a11y service
+     *                           already handles systemui filtering via
+     *                           SYSTEM_OVERLAY_PACKAGES; letting it through logcat
+     *                           too would re-write sForegroundPackage to systemui
+     *                           and reset the timestamp, making T1 appear stale.
      */
     private static final java.util.Set<String> BACKGROUND_NOISE_PACKAGES =
             new java.util.HashSet<>(java.util.Arrays.asList(
                     "com.pluskeymap.app",
-                    "com.paget96.batteryguru"
+                    "com.paget96.batteryguru",
+                    "com.android.systemui"
             ));
+
+    /**
+     * Helper: returns true if the package name belongs to a known camera app.
+     * Mirrors the logic in ActionExecutor.isCameraPackage() but kept local to
+     * avoid a cross-class dependency from a static method.
+     */
+    private static boolean isCameraPackageLogcat(String pkg) {
+        if (pkg == null) return false;
+        // Known camera packages (keep in sync with ActionExecutor.KNOWN_CAMERA_PACKAGES)
+        switch (pkg) {
+            case "com.oneplus.camera":
+            case "com.oppo.camera":
+            case "com.oplus.camera":
+            case "com.google.android.GoogleCamera":
+            case "com.google.android.GoogleCameraEng":
+            case "com.google.android.GoogleCameraGo":
+            case "com.sec.android.app.camera":
+            case "com.android.camera":
+            case "com.sonyericsson.android.camera":
+            case "org.codeaurora.snapcam":
+            case "net.sourceforge.opencamera":
+                return true;
+            default:
+                return pkg.toLowerCase().contains("camera");
+        }
+    }
 
     private void updateForegroundPackage(String pkg, String source) {
         if (pkg.equals(sForegroundPackage)) return; // no change
@@ -426,9 +470,37 @@ public class LogcatWatcher implements Runnable {
             if (sForegroundPackage != null) return;
         }
 
+        // A11y-priority guard: if the last update was from the AccessibilityService
+        // (higher-fidelity, fires on every window focus change) AND it set a
+        // non-camera package, do NOT allow the logcat parser to overwrite it back
+        // with a camera package.
+        //
+        // This prevents the race condition seen in production:
+        //   14:06:10.576  a11y → com.android.launcher   (user left camera)
+        //   14:06:10.877  logcat → com.oplus.camera      (trailing SurfaceControl log)
+        // Without this guard, the logcat line re-poisons the field back to the
+        // camera package, and the next key press incorrectly fires the shutter.
+        //
+        // The guard is only active when a11y last wrote a non-camera package.
+        // If a11y wrote a camera package (user opened camera), logcat is free to
+        // update normally — there is no harmful case there.
+        if (sLastWriteByA11y && isCameraPackageLogcat(pkg)) {
+            String currentPkg = sForegroundPackage;
+            if (currentPkg != null && !isCameraPackageLogcat(currentPkg)) {
+                // A11y said we left the camera; logcat is trying to re-set a camera
+                // package from a trailing log line. Reject it.
+                Log.d(TAG, "parseForegroundPackage [" + source + "]: SUPPRESSED camera pkg="
+                        + pkg + " (a11y already set non-camera pkg=" + currentPkg + ")");
+                return;
+            }
+        }
+
         Log.d(TAG, "parseForegroundPackage [" + source + "]: " + pkg);
         sForegroundPackage = pkg;
         sForegroundPackageTimestamp = System.currentTimeMillis();
+        // logcat wrote this update — clear the a11y-priority flag so future
+        // logcat updates are not suppressed unnecessarily.
+        sLastWriteByA11y = false;
     }
 
     private void handleKeyLine() {
